@@ -1,0 +1,32 @@
+{
+  "name": "socle",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Une seule plateforme pour les mini-apps de la maison : connexion, sessions, notifications et PWA fournies une fois pour toutes.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=26"
+  },
+  "scripts": {
+    "dev": "node --watch --env-file-if-exists=.env src/main.ts",
+    "start": "node src/main.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.8",
+    "hono": "^4.13.18",
+    "openid-client": "^6.8.9",
+    "web-push": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/web-push": "^3.6.4",
+    "jose": "^6.2.17",
+    "prettier": "^3.10.1",
+    "typescript": "^7.0.2"
+  }
+}

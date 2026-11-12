@@ -1,0 +1,51 @@
+# Example deployment behind Traefik (see README « Déploiement »).
+# Put the secrets in .env next to this file (see .env.example).
+services:
+  socle:
+    image: ghcr.io/tonyctalope/socle:latest
+    container_name: socle
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+    # The bind-mounted ./data must be writable by this uid:gid.
+    user: '${SOCLE_UID:-1000}:${SOCLE_GID:-1000}'
+    volumes:
+      - ./data:/data
+    read_only: true
+    mem_limit: 512m
+    pids_limit: 256
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    networks:
+      - frontend
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=frontend
+      - traefik.http.services.socle.loadbalancer.server.port=8787
+      # Control plane: one host.
+      - traefik.http.routers.socle.rule=Host(`${SOCLE_CONTROL_HOST:?set SOCLE_CONTROL_HOST in .env}`)
+      - traefik.http.routers.socle.entrypoints=websecure
+      - traefik.http.routers.socle.tls=true
+      - traefik.http.routers.socle.service=socle
+      # Apps: one label in front of APPS_DOMAIN (Traefik v3 syntax), under one wildcard certificate
+      # obtained with a DNS-01 resolver. The server checks the host exactly; this rule only routes.
+      - traefik.http.routers.socle-apps.rule=HostRegexp(`^[a-z0-9-]+\.${APPS_DOMAIN:?set APPS_DOMAIN in .env}$$`)
+      - traefik.http.routers.socle-apps.entrypoints=websecure
+      - traefik.http.routers.socle-apps.tls=true
+      - traefik.http.routers.socle-apps.tls.certresolver=${SOCLE_CERT_RESOLVER:-letsencrypt}
+      - traefik.http.routers.socle-apps.tls.domains[0].main=*.${APPS_DOMAIN}
+      - traefik.http.routers.socle-apps.service=socle
+
+networks:
+  frontend:
+    external: true

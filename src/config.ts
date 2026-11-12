@@ -1,0 +1,133 @@
+import path from 'node:path';
+import { isValidSlug } from './apps/slug.ts';
+
+export interface Config {
+  /** Origin of the control plane (sign-in, SSO), e.g. https://socle.example.com (no trailing slash). */
+  controlOrigin: string;
+  /** Its host as browsers send it (with the port when it is not the default one). */
+  controlHost: string;
+  /** Apps live on https://<slug>.<appsDomain>. */
+  appsDomain: string;
+  /** ":8787" in local development, empty behind the reverse proxy. */
+  portSuffix: string;
+  port: number;
+  host: string;
+  dataDir: string;
+  google: { clientId: string; clientSecret: string; issuer: string };
+  allowedEmails: ReadonlySet<string>;
+  vapid: { publicKey: string | null; privateKey: string | null; subject: string };
+  /** Serves the built-in demo app on demo.<appsDomain>. */
+  demoApp: boolean;
+  /** Local development only: /auth/dev-login signs in any allowlisted e-mail. */
+  devLogin: boolean;
+  secureCookies: boolean;
+}
+
+export class ConfigError extends Error {}
+
+const list = (value: string | undefined): string[] =>
+  (value ?? '')
+    .split(/[\s,;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+const flag = (value: string | undefined): boolean => value === '1' || value === 'true';
+
+const isLoopbackHost = (hostname: string) =>
+  hostname === 'localhost' || hostname.endsWith('.localhost') || hostname === '127.0.0.1' || hostname === '[::1]';
+
+const HOSTNAME = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+
+function positiveInt(value: string | undefined, fallback: number, name: string): number {
+  if (value === undefined || value === '') return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) throw new ConfigError(`${name} must be a positive integer`);
+  return parsed;
+}
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  const rawUrl = env.CONTROL_URL;
+  if (!rawUrl) throw new ConfigError('CONTROL_URL is required (e.g. https://socle.example.com)');
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new ConfigError(`CONTROL_URL is not a valid URL: ${rawUrl}`);
+  }
+  const loopback = isLoopbackHost(url.hostname);
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) {
+    throw new ConfigError('CONTROL_URL must use https:// (http:// is only accepted for localhost)');
+  }
+  if (url.pathname !== '/' || url.search || url.hash) {
+    throw new ConfigError('CONTROL_URL must be an origin without path, e.g. https://socle.example.com');
+  }
+
+  const appsDomain = (env.APPS_DOMAIN ?? '').trim().toLowerCase();
+  if (!appsDomain) throw new ConfigError('APPS_DOMAIN is required (apps are served on <app>.APPS_DOMAIN)');
+  if (!HOSTNAME.test(appsDomain)) throw new ConfigError(`APPS_DOMAIN is not a valid domain name: ${appsDomain}`);
+  if (url.hostname === appsDomain || url.hostname.endsWith(`.${appsDomain}`)) {
+    throw new ConfigError('CONTROL_URL must not be inside APPS_DOMAIN: an app could then take its place');
+  }
+  if (loopback !== isLoopbackHost(appsDomain)) {
+    throw new ConfigError('CONTROL_URL and APPS_DOMAIN must both be public, or both be localhost names');
+  }
+
+  const allowedEmails = new Set(list(env.ALLOWED_EMAILS).map((email) => email.toLowerCase()));
+  if (allowedEmails.size === 0) throw new ConfigError('ALLOWED_EMAILS must list at least one e-mail address');
+  for (const email of allowedEmails) {
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new ConfigError(`ALLOWED_EMAILS: invalid address ${email}`);
+  }
+
+  const devLogin = flag(env.DEV_LOGIN);
+  if (devLogin && (!loopback || env.NODE_ENV !== 'development')) {
+    throw new ConfigError('DEV_LOGIN is only allowed with NODE_ENV=development and a localhost CONTROL_URL');
+  }
+
+  const clientId = env.GOOGLE_CLIENT_ID ?? '';
+  const clientSecret = env.GOOGLE_CLIENT_SECRET ?? '';
+  if (!devLogin && (!clientId || !clientSecret)) {
+    throw new ConfigError('GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are required');
+  }
+
+  const vapidPublic = env.VAPID_PUBLIC_KEY || null;
+  const vapidPrivate = env.VAPID_PRIVATE_KEY || null;
+  if (Boolean(vapidPublic) !== Boolean(vapidPrivate)) {
+    throw new ConfigError('Set both VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY, or neither (keys are then generated)');
+  }
+  const secure = url.protocol === 'https:';
+  // Push services want an https: or mailto: contact; a plain-http dev origin is neither.
+  const vapidSubject = env.VAPID_SUBJECT || (secure ? url.origin : 'mailto:dev@socle.invalid');
+  if (!/^(https:\/\/|mailto:)\S+$/.test(vapidSubject)) {
+    throw new ConfigError('VAPID_SUBJECT must be an https:// URL or a mailto: address');
+  }
+
+  return {
+    controlOrigin: url.origin,
+    controlHost: url.host,
+    appsDomain,
+    portSuffix: url.port ? `:${url.port}` : '',
+    port: positiveInt(env.PORT, 8787, 'PORT'),
+    // With DEV_LOGIN anyone who reaches the port can sign in: stay on this machine by default.
+    host: env.HOST || (devLogin ? '127.0.0.1' : '0.0.0.0'),
+    dataDir: path.resolve(env.DATA_DIR || 'data'),
+    google: { clientId, clientSecret, issuer: env.GOOGLE_ISSUER || 'https://accounts.google.com' },
+    allowedEmails,
+    vapid: { publicKey: vapidPublic, privateKey: vapidPrivate, subject: vapidSubject },
+    demoApp: flag(env.DEMO_APP),
+    devLogin,
+    secureCookies: secure,
+  };
+}
+
+/** Origin of an app. Always built from the configuration, never from a request's Host header. */
+export function appOrigin(config: Config, slug: string): string {
+  return `${config.secureCookies ? 'https' : 'http'}://${slug}.${config.appsDomain}${config.portSuffix}`;
+}
+
+/** The app a request host belongs to: exactly one valid label in front of the apps domain. */
+export function appSlugFromHost(config: Config, host: string): string | null {
+  const suffix = `.${config.appsDomain}${config.portSuffix}`;
+  if (!host.endsWith(suffix)) return null;
+  const slug = host.slice(0, -suffix.length);
+  return isValidSlug(slug) ? slug : null;
+}

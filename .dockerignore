@@ -1,0 +1,12 @@
+node_modules
+data
+coverage
+test
+scripts
+.git
+.github
+.env
+.env.*
+*.db
+*.md
+!README.md
