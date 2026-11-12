@@ -1,0 +1,723 @@
+import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { after, describe, it } from 'node:test';
+import { bundleServer } from '../src/runner/build/server.ts';
+import { DEFAULT_LIMITS, type Limits } from '../src/runner/limits.ts';
+import { AppDatabases, applyMigrations, MigrationError } from '../src/runner/sandbox/appdb.ts';
+import { callFunction, describeBundle, type CallRequest, type CallResult } from '../src/runner/sandbox/call.ts';
+
+// What an app's server code can and cannot do. Each test writes the code an app
+// would send, builds it as the platform does, and calls it in a real sandbox.
+
+const LIMITS: Limits = { ...DEFAULT_LIMITS, callMs: 400, guestMemory: 16 * 1024 * 1024 };
+const TONY = { id: 1, name: 'Tony' };
+const CHLOE = { id: 2, name: 'Chloé' };
+
+const dir = mkdtempSync(path.join(tmpdir(), 'socle-sandbox-'));
+const databases = new AppDatabases(dir, LIMITS);
+after(() => {
+  databases.closeAll();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+const SCHEMA = `CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL, author INTEGER NOT NULL);`;
+
+async function app(name: string, source: string, migrations: Record<string, string> = { '001_init.sql': SCHEMA }) {
+  const database = `${name}/live`;
+  const connection = databases.migrator(database);
+  try {
+    applyMigrations(
+      connection,
+      Object.entries(migrations).map(([file, sql]) => ({ name: file, sql })),
+    );
+  } finally {
+    connection.db.close();
+  }
+  const built = await bundleServer({
+    'server/index.ts': `import { query, mutation, v, fail } from '@socle/server';\n${source}`,
+  });
+  const bundle = built!.code;
+  const call = (fn: string, input: unknown = null, overrides: Partial<CallRequest> = {}, limits = LIMITS) =>
+    callFunction(
+      databases,
+      {
+        database,
+        bundle,
+        fn,
+        input,
+        user: TONY,
+        members: [TONY, CHLOE],
+        now: 1_800_000_000_000,
+        today: '2027-01-15',
+        ...overrides,
+      },
+      limits,
+    );
+  return { call, bundle, database };
+}
+
+function value(result: CallResult): unknown {
+  assert.equal(result.ok, true, result.ok ? '' : `${result.error.code}: ${result.error.message}`);
+  return result.ok ? result.value : undefined;
+}
+
+function refused(result: CallResult, code: string | RegExp, message?: RegExp): void {
+  assert.equal(result.ok, false, `expected a refusal, got ${JSON.stringify(result.ok ? result.value : null)}`);
+  if (result.ok) return;
+  if (typeof code === 'string') assert.equal(result.error.code, code, result.error.message);
+  else assert.match(result.error.code, code, result.error.message);
+  if (message) assert.match(result.error.message, message);
+}
+
+const NOTES = `
+  export const list = query(({ db }) => db.all('SELECT id, body, author FROM notes ORDER BY id'));
+  export const count = query(({ db }) => db.get('SELECT COUNT(*) AS n FROM notes').n);
+  export const add = mutation({
+    input: v.object({ body: v.string().min(1).max(200) }),
+    handler: ({ db, user }, { body }) => db.run('INSERT INTO notes (body, author) VALUES (?, ?)', body, user.id),
+  });
+`;
+
+describe('server functions', () => {
+  it('reads and writes the app database, one transaction per call', async () => {
+    const notes = await app(
+      'basics',
+      `${NOTES}
+      export const who = query(({ user, members, now, today }) => ({ user, members, now, today }));
+      export const byId = query(({ db }, { id }) => db.get('SELECT body FROM notes WHERE id = :id', { id }));
+      export const addTwice = mutation(({ db }) => {
+        db.run("INSERT INTO notes (body, author) VALUES ('first', 1)");
+        fail('Pas deux fois.', 'twice');
+      });
+      export const crash = mutation(({ db }) => {
+        db.run("INSERT INTO notes (body, author) VALUES ('lost', 1)");
+        return undefinedVariable + 1;
+      });
+      export const later = mutation(async ({ db }, { body }) => {
+        await null;
+        return db.run('INSERT INTO notes (body, author) VALUES (?, 1)', body).changes;
+      });
+      export const chatty = query(() => { console.log('hello', { a: 1 }); console.warn('careful'); return 1; });
+      export const flags = query(({ db }) => db.get('SELECT ? AS yes, ? AS no, ? AS empty', true, false, undefined));
+    `,
+    );
+    assert.deepEqual(value(await notes.call('add', { body: 'Pain' })), { changes: 1, lastInsertRowid: 1 });
+    assert.deepEqual(value(await notes.call('list')), [{ id: 1, body: 'Pain', author: 1 }]);
+    assert.deepEqual(value(await notes.call('byId', { id: 1 })), { body: 'Pain' });
+    assert.equal(value(await notes.call('byId', { id: 99 })), null);
+    assert.deepEqual(value(await notes.call('who')), {
+      user: TONY,
+      members: [TONY, CHLOE],
+      now: 1_800_000_000_000,
+      today: '2027-01-15',
+    });
+    assert.deepEqual(value(await notes.call('flags')), { yes: 1, no: 0, empty: null });
+
+    // A function that fails leaves nothing behind, whether it gives up or crashes.
+    refused(await notes.call('addTwice'), 'user:twice', /^Pas deux fois\.$/);
+    refused(await notes.call('crash'), 'error', /ReferenceError: 'undefinedVariable' is not defined/);
+    assert.equal(value(await notes.call('count')), 1);
+
+    // Agents write async functions out of habit: they work, as long as nothing waits on a timer.
+    assert.equal(value(await notes.call('later', { body: 'Lait' })), 1);
+    assert.equal(value(await notes.call('count')), 2);
+
+    const chatty = await notes.call('chatty');
+    assert.deepEqual(chatty.logs, ['log: hello {"a":1}', 'warn: careful']);
+  });
+
+  it('checks the input against the declared shape before the function runs', async () => {
+    const notes = await app('inputs', NOTES);
+    refused(await notes.call('add', {}), 'invalid_input', /input\.body: required/);
+    refused(await notes.call('add', { body: '' }), 'invalid_input', /must not be empty/);
+    refused(await notes.call('add', { body: 'x'.repeat(201) }), 'invalid_input', /at most 200/);
+    refused(await notes.call('add', { body: 'ok', admin: true }), 'invalid_input', /input\.admin: unknown field/);
+    refused(await notes.call('add', 'Pain'), 'invalid_input', /expected an object/);
+    assert.equal(value(await notes.call('count')), 0);
+  });
+
+  it('only exposes what the app exported as a query or a mutation', async () => {
+    const notes = await app(
+      'exports',
+      `${NOTES}
+      export const helper = () => 'not a function of the app';
+      export const secret = 42;
+      const hidden = query(() => 1);
+    `,
+    );
+    for (const name of [
+      'helper',
+      'secret',
+      'hidden',
+      'toString',
+      'constructor',
+      '__proto__',
+      'nope',
+      '',
+      'a b',
+      '../x',
+    ]) {
+      refused(await notes.call(name), 'unknown_function');
+    }
+    assert.deepEqual(
+      (await describeBundle(notes.bundle, LIMITS)).map((fn) => `${fn.kind} ${fn.name}`),
+      ['mutation add', 'query count', 'query list'],
+    );
+  });
+
+  it('describes functions: kind, input shape, description for Claude', async () => {
+    const built = await bundleServer({
+      'server/index.ts': `
+        import { mutation, query, v } from '@socle/server';
+        import { MAX } from '../shared/limits';
+        export const addExpense = mutation({
+          tool: 'Ajoute une dépense au compte commun.',
+          input: v.object({
+            label: v.string().min(1).max(MAX).describe('Ce qui a été acheté'),
+            cents: v.int().min(1),
+            day: v.string().date().optional(),
+            split: v.array(v.int()).max(10).optional(),
+            kind: v.enum(['courses', 'loyer']).nullable(),
+          }),
+          handler: () => null,
+        });
+        export const total = query(() => 0);
+      `,
+      'shared/limits.ts': 'export const MAX = 80;',
+    });
+    assert.deepEqual(await describeBundle(built!.code, LIMITS), [
+      {
+        name: 'addExpense',
+        kind: 'mutation',
+        tool: 'Ajoute une dépense au compte commun.',
+        input: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['label', 'cents', 'kind'],
+          properties: {
+            label: { type: 'string', minLength: 1, maxLength: 80, description: 'Ce qui a été acheté' },
+            cents: { type: 'integer', minimum: 1 },
+            day: { type: 'string', format: 'date' },
+            split: { type: 'array', items: { type: 'integer' }, maxItems: 10 },
+            kind: { anyOf: [{ type: 'string', enum: ['courses', 'loyer'] }, { type: 'null' }] },
+          },
+        },
+      },
+      { name: 'total', kind: 'query', input: null, tool: null },
+    ]);
+  });
+
+  it('collects the notifications a mutation asks for', async () => {
+    const notes = await app(
+      'notify',
+      `
+      export const ping = mutation(({ notify, user }) => {
+        notify('others', { title: user.name + ' a ajouté une note', body: 'Pain', url: '/notes/1' });
+        notify(2, { title: 'Pour toi' });
+        notify([1, 2], { title: 'Ailleurs', url: 'https://evil.example/' });
+      });
+      export const quiet = query(({ notify }) => { notify('all', { title: 'Lu' }); return 1; });
+      export const flood = mutation(({ notify }) => { for (let i = 0; i < 100; i++) notify('all', { title: 'Encore' }); });
+      export const vague = mutation(({ notify }) => notify('everyone', { title: 'x' }));
+    `,
+    );
+    const ping = await notes.call('ping');
+    assert.deepEqual(ping.ok && ping.effects, [
+      { type: 'notify', to: 'others', title: 'Tony a ajouté une note', body: 'Pain', url: '/notes/1' },
+      { type: 'notify', to: [2], title: 'Pour toi', body: '', url: '/' },
+      { type: 'notify', to: [1, 2], title: 'Ailleurs', body: '', url: '/' }, // only paths of the app
+    ]);
+    const quiet = await notes.call('quiet');
+    assert.deepEqual(quiet.ok && quiet.effects, [], 'reading something never notifies anyone');
+    refused(await notes.call('flood'), 'error', /at most 20 notifications/);
+    refused(await notes.call('vague'), 'error', /notify\(to/);
+  });
+});
+
+describe('what an app cannot do with its database', () => {
+  it('a query cannot write', async () => {
+    const notes = await app(
+      'readonly',
+      `${NOTES}
+      export const sneaky = query(({ db }) => db.run("INSERT INTO notes (body, author) VALUES ('x', 1)"));
+      export const wipe = query(({ db }) => db.run('DELETE FROM notes'));
+    `,
+    );
+    await notes.call('add', { body: 'Pain' });
+    refused(await notes.call('sneaky'), 'error', /readonly|read-only|not authorized/i);
+    refused(await notes.call('wipe'), 'error', /readonly|read-only|not authorized/i);
+    assert.equal(value(await notes.call('count')), 1);
+  });
+
+  it('cannot end, restart or nest the transaction of its call', async () => {
+    const statements = [
+      'COMMIT',
+      'END',
+      'ROLLBACK',
+      'BEGIN',
+      'BEGIN IMMEDIATE',
+      'SAVEPOINT s',
+      'RELEASE s',
+      'ROLLBACK TO s',
+    ];
+    const notes = await app(
+      'transactions',
+      `${NOTES}
+      export const early = mutation(({ db }, { sql }) => {
+        db.run("INSERT INTO notes (body, author) VALUES ('ghost', 1)");
+        try { db.run(sql); } catch (error) { fail(error.message, 'sql'); }
+        throw new Error('boom');
+      });
+    `,
+    );
+    for (const sql of statements)
+      refused(await notes.call('early', { sql }), 'user:sql', /^not allowed: (TRANSACTION|SAVEPOINT) /);
+    assert.equal(value(await notes.call('count')), 0, 'no partial write survived');
+  });
+
+  it('cannot change the schema or the settings outside migrations', async () => {
+    const notes = await app(
+      'ddl',
+      `${NOTES}
+      export const attempt = mutation(({ db }, { sql }) => db.all(sql));
+    `,
+    );
+    for (const sql of [
+      'CREATE TABLE extra (x)',
+      'DROP TABLE notes',
+      'ALTER TABLE notes ADD COLUMN x',
+      'CREATE INDEX i ON notes(body)',
+      'CREATE TEMP TABLE t (x)',
+      'CREATE VIEW w AS SELECT 1',
+      'CREATE TRIGGER tr AFTER INSERT ON notes BEGIN DELETE FROM notes; END',
+      'CREATE VIRTUAL TABLE f USING fts5(x)',
+      'PRAGMA journal_mode = DELETE',
+      'PRAGMA foreign_keys = OFF',
+      'PRAGMA writable_schema = ON',
+      'PRAGMA database_list',
+      'SELECT * FROM pragma_database_list',
+      "SELECT * FROM pragma_table_info('notes')",
+      'ANALYZE',
+      'REINDEX',
+      'VACUUM',
+      "UPDATE sqlite_master SET sql = 'x'",
+      'DELETE FROM sqlite_sequence',
+    ]) {
+      refused(await notes.call('attempt', { sql }), 'error');
+    }
+    // The app can list its tables; the platform's own one shows up there by name only.
+    assert.deepEqual(
+      value(await notes.call('attempt', { sql: "SELECT name FROM sqlite_master WHERE type = 'table'" })),
+      [{ name: '_socle_migrations' }, { name: 'notes' }],
+    );
+  });
+
+  it('cannot reach another app, a file or native code', async () => {
+    const victim = await app('victim', NOTES);
+    await victim.call('add', { body: 'secret de victim' });
+    const victimFile = path.join(dir, 'victim', 'live.db');
+    assert.ok(existsSync(victimFile));
+    const thief = await app(
+      'thief',
+      `${NOTES}
+      export const attempt = mutation(({ db }, { sql, params }) => db.all(sql, ...(params ?? [])));
+    `,
+    );
+    for (const [sql, params] of [
+      [`ATTACH DATABASE '${victimFile}' AS other`],
+      ['ATTACH DATABASE ? AS other', [victimFile]],
+      [`ATTACH DATABASE 'file:${victimFile}?mode=ro' AS other`],
+      ["ATTACH DATABASE ':memory:' AS mem"],
+      ['DETACH DATABASE main'],
+      [`VACUUM INTO '${path.join(dir, 'stolen.db')}'`],
+      ['VACUUM main INTO ?', [path.join(dir, 'stolen.db')]],
+      [`SELECT load_extension('${victimFile}')`],
+      ["SELECT load_extension('libc.so.6', 'system')"],
+      [`SELECT readfile('${victimFile}')`],
+      [`SELECT writefile('${path.join(dir, 'x')}', 'x')`],
+      ['SELECT * FROM victim.notes'],
+      ['SELECT * FROM other.notes'],
+      ['SELECT * FROM temp.sqlite_master'],
+      ['SELECT * FROM _socle_migrations'],
+      ["INSERT INTO _socle_migrations VALUES ('x', 'y', 'z')"],
+      ['DELETE FROM _socle_migrations'],
+      ['DROP TABLE _socle_migrations'],
+    ] as [string, unknown[]?][]) {
+      refused(await thief.call('attempt', { sql, params }), 'error');
+    }
+    assert.ok(!existsSync(path.join(dir, 'stolen.db')));
+    assert.deepEqual(readdirSync(path.join(dir, 'thief')).sort(), ['live.db', 'live.db-shm', 'live.db-wal']);
+    assert.deepEqual(value(await victim.call('list')), [{ id: 1, body: 'secret de victim', author: 1 }]);
+    assert.deepEqual(value(await thief.call('list')), []);
+  });
+
+  it('cannot read without bound', async () => {
+    const limits = { ...LIMITS, maxRows: 100, maxRowBytes: 50_000, maxResultBytes: 20_000 };
+    const notes = await app(
+      'bounds',
+      `
+      export const rows = query(({ db }, { n }) =>
+        db.all('WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < ?) SELECT x FROM c', n).length);
+      export const wide = query(({ db }) => db.all("SELECT printf('%.*c', 30000, 'x') AS a, printf('%.*c', 30000, 'y') AS b").length);
+      export const first = query(({ db }) => db.get('WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT x FROM c'));
+      export const huge = query(({ db }) => db.get('SELECT zeroblob(100000000) AS z'));
+      export const blob = query(({ db }) => db.get('SELECT randomblob(8) AS z'));
+      export const big = query(() => 'x'.repeat(30000));
+    `,
+    );
+    const call = (fn: string, input?: unknown) => notes.call(fn, input, {}, limits);
+    assert.equal(value(await call('rows', { n: 100 })), 100);
+    refused(await call('rows', { n: 101 }), 'error', /more than 100 rows: add a LIMIT/);
+    refused(await call('wide'), 'error', /too much data/);
+    assert.deepEqual(value(await call('first')), { x: 1 }, 'get() stops at the first row of an endless query');
+    refused(await call('huge'), 'error', /too big/);
+    refused(await call('blob'), 'error', /BLOB/);
+    refused(await call('big'), 'result_too_large');
+  });
+
+  it('cannot fill the disk: an app database has a maximum size', async () => {
+    const limits = { ...LIMITS, dbMaxPages: 64, callMs: 3_000 };
+    const small = new AppDatabases(dir, limits);
+    try {
+      const built = await bundleServer({
+        'server/index.ts': `
+          import { mutation, query } from '@socle/server';
+          export const fill = mutation(({ db }) => {
+            for (let i = 0; i < 400; i++) db.run("INSERT INTO blobs (body) VALUES (printf('%.*c', 4000, 'x'))");
+          });
+          export const count = query(({ db }) => db.get('SELECT COUNT(*) AS n FROM blobs').n);
+        `,
+      });
+      const connection = small.migrator('quota/live');
+      applyMigrations(connection, [{ name: '001.sql', sql: 'CREATE TABLE blobs (body TEXT)' }]);
+      connection.db.close();
+      const request = {
+        database: 'quota/live',
+        bundle: built!.code,
+        input: null,
+        user: TONY,
+        members: [],
+        now: 0,
+        today: '',
+      };
+      refused(await callFunction(small, { ...request, fn: 'fill' }, limits), 'error', /full/);
+      assert.equal(value(await callFunction(small, { ...request, fn: 'count' }, limits)), 0);
+    } finally {
+      small.closeAll();
+    }
+  });
+});
+
+describe('what an app cannot do with the machine', () => {
+  it('has no access to files, network, processes or the host', async () => {
+    const notes = await app(
+      'globals',
+      `
+      export const probe = query(() => ({
+        present: ['require', 'process', 'fetch', 'XMLHttpRequest', 'WebSocket', 'setTimeout', 'setInterval', 'Deno', 'Bun',
+          'module', 'global', 'Buffer', 'WebAssembly', 'Worker', 'importScripts', 'navigator', 'os', 'std', 'scriptArgs',
+          'performance', 'crypto'].filter((name) => typeof globalThis[name] !== 'undefined'),
+        door: typeof __host,
+      }));
+      export const dynamic = query(async () => { const name = 'node:fs'; await import(name); });
+      export const viaFunction = query(() => new Function('return typeof process + typeof require')());
+      export const viaEval = query(() => (0, eval)('typeof process'));
+      export const constructorEscape = query(({ db }) => db.all.constructor('return this')().process === undefined);
+      export const errorEscape = query(({ db }) => {
+        try { db.all('SELECT * FROM missing'); } catch (error) {
+          return { type: Object.prototype.toString.call(error), keys: Object.getOwnPropertyNames(error).sort(), ctor: error.constructor === Error };
+        }
+      });
+    `,
+    );
+    assert.deepEqual(value(await notes.call('probe')), { present: [], door: 'undefined' });
+    refused(await notes.call('dynamic'), 'error');
+    assert.equal(value(await notes.call('viaFunction')), 'undefinedundefined');
+    assert.equal(value(await notes.call('viaEval')), 'undefined');
+    assert.equal(value(await notes.call('constructorEscape')), true);
+    // What comes back from the host is a plain error of the sandbox's own realm, with a message and nothing else.
+    assert.deepEqual(value(await notes.call('errorEscape')), {
+      type: '[object Error]',
+      keys: ['message', 'name', 'stack'],
+      ctor: true,
+    });
+  });
+
+  it('is stopped when it loops forever', async () => {
+    const notes = await app(
+      'loops',
+      `${NOTES}
+      export const spin = mutation(({ db }) => { db.run("INSERT INTO notes (body, author) VALUES ('ghost', 1)"); for (;;) {} });
+      export const spinQuery = query(() => { while (true) {} });
+      export const stubborn = mutation(() => { for (;;) { try { for (;;) {} } catch {} } });
+      export const asyncSpin = mutation(async () => { for (;;) await null; });
+      export const never = mutation(() => new Promise(() => {}));
+      export const regex = query(() => /^(a+)+$/.test('a'.repeat(40) + '!'));
+      export const slowSql = query(({ db }) => { for (;;) db.get('SELECT 1'); });
+    `,
+    );
+    for (const fn of ['spin', 'spinQuery', 'stubborn', 'asyncSpin', 'regex', 'slowSql']) {
+      const started = Date.now();
+      refused(await notes.call(fn), 'timeout');
+      assert.ok(Date.now() - started < 2_000, `${fn} was stopped in time`);
+    }
+    refused(await notes.call('never'), 'error', /never settles/);
+    assert.equal(value(await notes.call('count')), 0, 'the write of the stopped mutation was rolled back');
+    assert.deepEqual(value(await notes.call('add', { body: 'après' })), { changes: 1, lastInsertRowid: 1 });
+  });
+
+  it('is stopped when the file itself loops while loading', async () => {
+    const looping = await app('toplevel', `for (;;) {}\nexport const ok = query(() => 1);`);
+    refused(await looping.call('ok'), 'timeout');
+  });
+
+  it('is stopped when it eats memory', async () => {
+    const notes = await app(
+      'memory',
+      `${NOTES}
+      export const array = mutation(() => { const all = []; for (;;) all.push(new Array(10000).fill('x')); });
+      export const text = mutation(() => { let s = 'x'; for (;;) s += s; });
+      export const buffer = mutation(() => new ArrayBuffer(1 << 30).byteLength);
+      export const viaSql = mutation(({ db }) => {
+        const all = [];
+        for (;;) all.push(db.all("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 5000) SELECT printf('%.*c', 200, 'x') AS s FROM c"));
+      });
+    `,
+    );
+    for (const fn of ['array', 'text', 'buffer', 'viaSql']) refused(await notes.call(fn), /^(memory|error|timeout)$/);
+    assert.deepEqual(value(await notes.call('add', { body: 'après' })), { changes: 1, lastInsertRowid: 1 });
+  });
+
+  it('is stopped when it recurses too deeply, in code or in data', async () => {
+    const notes = await app(
+      'stack',
+      `${NOTES}
+      export const recursion = query(() => { const f = () => f() + 1; return f(); });
+      export const getter = query(() => { const o = { get x() { return this.x; } }; return o.x; });
+      export const nestedParse = query(() => JSON.parse('['.repeat(200000) + ']'.repeat(200000)));
+      export const nestedStringify = query(() => { const o = {}; let c = o; for (let i = 0; i < 200000; i++) { c.a = {}; c = c.a; } return JSON.stringify(o).length; });
+      export const nestedSource = query(() => eval('('.repeat(100000) + '1' + ')'.repeat(100000)));
+      export const nestedResult = query(() => { const o = {}; let c = o; for (let i = 0; i < 200000; i++) { c.a = {}; c = c.a; } return o; });
+      export const fine = query(() => { const f = (n) => (n ? f(n - 1) + 1 : 0); return f(500); });
+    `,
+    );
+    for (const fn of ['recursion', 'getter', 'nestedParse', 'nestedStringify', 'nestedSource', 'nestedResult']) {
+      refused(await notes.call(fn), /^(stack_overflow|error|memory)$/);
+    }
+    assert.equal(value(await notes.call('fine')), 500);
+    assert.deepEqual(value(await notes.call('add', { body: 'après' })), { changes: 1, lastInsertRowid: 1 });
+  });
+
+  it('starts from nothing at every call', async () => {
+    const notes = await app(
+      'state',
+      `
+      let counter = 0;
+      globalThis.leak = globalThis.leak ?? [];
+      export const bump = query(() => { counter += 1; globalThis.leak.push(1); Object.prototype.polluted = true; return [counter, globalThis.leak.length]; });
+      export const check = query(() => [counter, typeof globalThis.leak, ({}).polluted === undefined]);
+    `,
+    );
+    assert.deepEqual(value(await notes.call('bump')), [1, 1]);
+    assert.deepEqual(value(await notes.call('bump')), [1, 1]);
+    assert.deepEqual(value(await notes.call('check')), [0, 'object', true]);
+  });
+
+  it('cannot replace what the platform calls inside the sandbox', async () => {
+    // The app swaps every global it can reach, while its file loads and again inside a call.
+    const sabotage = `
+      const fake = { __kind: () => 'mutation', __invoke: () => '{"value":"hijacked","effects":[]}', __describe: () => '[]' };
+      for (const attempt of [
+        () => { globalThis.__socle.__invoke = fake.__invoke; },
+        () => { globalThis.__socle = fake; },
+        () => { Object.defineProperty(globalThis, '__socle', { value: fake }); },
+        () => { globalThis.__host = () => '[{"id":1,"body":"forged"}]'; },
+      ]) { try { attempt(); } catch {} }
+    `;
+    const notes = await app(
+      'swap',
+      `${NOTES}
+      ${sabotage}
+      export const again = query(({ db }) => { ${sabotage} return db.all('SELECT 1 AS one'); });
+    `,
+    );
+    assert.deepEqual(value(await notes.call('list')), []);
+    assert.deepEqual(value(await notes.call('again')), [{ one: 1 }]);
+    refused(await notes.call('nope'), 'unknown_function');
+    assert.deepEqual(
+      (await describeBundle(notes.bundle, LIMITS)).map((fn) => fn.name),
+      ['add', 'again', 'count', 'list'],
+    );
+  });
+
+  it('cannot forge what the platform reads back', async () => {
+    const notes = await app(
+      'forge',
+      `
+      export const badJson = query(() => { JSON.stringify = () => 'not json'; return 1; });
+      export const notText = query(() => { JSON.stringify = () => ({ toString: () => 'x' }); return 1; });
+      export const thrower = query(() => { throw { toString() { throw new Error('nope'); }, get message() { throw new Error('nope'); } }; });
+      export const throwNumber = query(() => { throw 42; });
+      export const hugeError = query(() => { throw new Error('x'.repeat(100000)); });
+      export const fakeTimeout = query(() => { const e = new Error('interrupted'); e.name = 'InternalError'; throw e; });
+    `,
+    );
+    // Replacing JSON only breaks the app's own code: the platform kept the real one.
+    assert.equal(value(await notes.call('badJson')), 1);
+    assert.equal(value(await notes.call('notText')), 1);
+    refused(await notes.call('thrower'), 'error');
+    refused(await notes.call('throwNumber'), 'error', /42/);
+    const huge = await notes.call('hugeError');
+    assert.ok(!huge.ok && huge.error.message.length <= 2_000);
+    // An app may claim it timed out; that only ever affects its own call.
+    refused(await notes.call('fakeTimeout'), 'timeout');
+  });
+});
+
+describe('migrations', () => {
+  const migrate = (database: string, migrations: Record<string, string>) => {
+    const connection = databases.migrator(database);
+    try {
+      return applyMigrations(
+        connection,
+        Object.entries(migrations).map(([name, sql]) => ({ name, sql })),
+      );
+    } finally {
+      connection.db.close();
+    }
+  };
+
+  it('apply once, in order, and all together', async () => {
+    const first = { '001_init.sql': SCHEMA };
+    assert.deepEqual(migrate('migr/live', first), { applied: ['001_init.sql'], unknown: [] });
+    assert.deepEqual(migrate('migr/live', first), { applied: [], unknown: [] });
+
+    const second = {
+      ...first,
+      '002_tags.sql':
+        'CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT); ALTER TABLE notes ADD COLUMN tag INTEGER REFERENCES tags(id);',
+      '003_broken.sql': "INSERT INTO tags (name) VALUES ('ok'); CREATE TABLE notes (again)",
+    };
+    assert.throws(
+      () => migrate('migr/live', second),
+      (error) =>
+        error instanceof MigrationError && error.migration === '003_broken.sql' && /already exists/.test(error.message),
+    );
+    // 002 was part of the failed batch: nothing of it remains.
+    const { call } = await app(
+      'migr',
+      `export const tables = query(({ db }) => db.all("SELECT name FROM sqlite_master WHERE type = 'table' AND substr(name, 1, 7) <> '_socle_' ORDER BY name").map((row) => row.name));`,
+      first,
+    );
+    assert.deepEqual(value(await call('tables')), ['notes']);
+
+    const fixed = { ...second, '003_broken.sql': "INSERT INTO tags (name) VALUES ('ok')" };
+    assert.deepEqual(migrate('migr/live', fixed), { applied: ['002_tags.sql', '003_broken.sql'], unknown: [] });
+    assert.deepEqual(value(await call('tables')), ['notes', 'tags']);
+  });
+
+  it('refuse a migration edited after it was applied, or slipped in before applied ones', () => {
+    migrate('edited/live', { '001_init.sql': SCHEMA, '003_more.sql': 'CREATE TABLE more (x)' });
+    assert.throws(
+      () => migrate('edited/live', { '001_init.sql': `${SCHEMA} -- changed`, '003_more.sql': 'CREATE TABLE more (x)' }),
+      (error) =>
+        error instanceof MigrationError && error.migration === '001_init.sql' && /has changed/.test(error.message),
+    );
+    assert.throws(
+      () =>
+        migrate('edited/live', {
+          '001_init.sql': SCHEMA,
+          '002_late.sql': 'CREATE TABLE late (x)',
+          '003_more.sql': 'CREATE TABLE more (x)',
+        }),
+      (error) =>
+        error instanceof MigrationError && error.migration === '002_late.sql' && /later name/.test(error.message),
+    );
+    // An older version of the app (after a rollback) simply knows fewer migrations.
+    assert.deepEqual(migrate('edited/live', { '001_init.sql': SCHEMA }), { applied: [], unknown: ['003_more.sql'] });
+  });
+
+  it('can do what a schema needs', async () => {
+    assert.deepEqual(
+      migrate('rich/live', {
+        '001.sql': `
+          CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+          CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL, owner INTEGER REFERENCES people(id) ON DELETE SET NULL, done INTEGER NOT NULL DEFAULT 0);
+          CREATE INDEX tasks_owner ON tasks(owner);
+          CREATE VIEW open_tasks AS SELECT * FROM tasks WHERE done = 0;
+          CREATE TRIGGER tasks_touch AFTER UPDATE ON tasks BEGIN UPDATE people SET name = name WHERE id = NEW.owner; END;
+          INSERT INTO people (name) VALUES ('Tony'), ('Chloé');
+          INSERT INTO tasks (title, owner) VALUES ('Poubelles', 1);`,
+        '002.sql': `
+          ALTER TABLE tasks ADD COLUMN due TEXT;
+          ALTER TABLE tasks RENAME COLUMN title TO label;
+          ALTER TABLE people RENAME TO members;
+          CREATE TABLE scratch (x); DROP TABLE scratch;
+          DROP INDEX tasks_owner; CREATE INDEX tasks_owner ON tasks(owner, done);
+          CREATE VIRTUAL TABLE search USING fts5(label);
+          INSERT INTO search (rowid, label) SELECT id, label FROM tasks;
+          ANALYZE;`,
+      }).applied,
+      ['001.sql', '002.sql'],
+    );
+    const { call } = await app(
+      'rich',
+      `
+      export const find = query(({ db }, { text }) => db.all('SELECT rowid AS id, label FROM search WHERE search MATCH ?', text));
+      export const open = query(({ db }) => db.all('SELECT label, m.name AS owner FROM open_tasks JOIN members m ON m.id = owner'));
+      export const finish = mutation(({ db }, { id }) => db.run('UPDATE tasks SET done = 1 WHERE id = ?', id).changes);
+      export const orphan = mutation(({ db }) => db.run("INSERT INTO tasks (label, owner) VALUES ('x', 999)"));
+    `,
+      {},
+    );
+    assert.deepEqual(value(await call('find', { text: 'poubelles' })), [{ id: 1, label: 'Poubelles' }]);
+    assert.deepEqual(value(await call('open')), [{ label: 'Poubelles', owner: 'Tony' }]);
+    assert.equal(value(await call('finish', { id: 1 })), 1);
+    refused(await call('orphan'), 'error', /FOREIGN KEY/);
+  });
+
+  it('cannot do what a function cannot do either', () => {
+    for (const sql of [
+      "ATTACH DATABASE ':memory:' AS other",
+      'PRAGMA journal_mode = DELETE',
+      'COMMIT',
+      'COMMIT; CREATE TABLE after_commit (x)',
+      'CREATE TEMP TABLE t (x)',
+      'CREATE TABLE _socle_mine (x)',
+      'DROP TABLE _socle_migrations',
+      "INSERT INTO _socle_migrations VALUES ('000.sql', 'x', 'y')",
+      'CREATE TABLE sqlite_mine (x)',
+      "CREATE VIRTUAL TABLE t USING csv(filename='/etc/passwd')",
+      'CREATE VIRTUAL TABLE t USING rtree(id, a, b)',
+      "SELECT load_extension('x')",
+      `VACUUM INTO '${path.join(dir, 'stolen-by-migration.db')}'`,
+    ]) {
+      assert.throws(
+        () => migrate('strict/live', { '001.sql': sql }),
+        (error) => error instanceof MigrationError,
+        sql,
+      );
+    }
+    assert.ok(!existsSync(path.join(dir, 'stolen-by-migration.db')));
+    assert.deepEqual(migrate('strict/live', { '001.sql': SCHEMA }), { applied: ['001.sql'], unknown: [] });
+  });
+
+  it('only accepts database names made of an app and a short name', () => {
+    for (const name of [
+      '../x/live',
+      'a/../../etc',
+      '/etc/passwd',
+      'app',
+      'app/live/x',
+      'App/live',
+      'app/live.db',
+      'a b/live',
+      '',
+    ]) {
+      assert.throws(() => databases.migrator(name), /invalid database name/, name);
+      assert.throws(() => databases.get(name), /invalid database name/, name);
+    }
+  });
+});

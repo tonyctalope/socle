@@ -11,19 +11,27 @@
   "scripts": {
     "dev": "node --watch --env-file-if-exists=.env src/main.ts",
     "start": "node src/main.ts",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.kit.json",
     "test": "node --test \"test/**/*.test.ts\"",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },
   "dependencies": {
     "@hono/node-server": "^2.1.8",
+    "@jitl/quickjs-wasmfile-release-sync": "^0.32.0",
+    "esbuild": "^0.28.2",
     "hono": "^4.13.18",
     "openid-client": "^6.8.9",
+    "quickjs-emscripten-core": "^0.32.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tailwindcss": "^4.3.5",
     "web-push": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@types/web-push": "^3.6.4",
     "jose": "^6.2.17",
     "prettier": "^3.10.1",
