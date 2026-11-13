@@ -95,6 +95,22 @@ declare module '@socle/server' {
     definition: Definition<I, R> | ((context: Context, input: I) => R | Promise<R>),
   ): ServerFunction;
 
+  /**
+   * A function the platform runs by itself, in the instance's timezone:
+   *   schedule({ every: 'day', at: '08:00', handler: ({ db, members, today, notify }) => { … } })
+   *   schedule({ every: 'week', on: 'monday', at: '07:30', handler })      schedule({ every: 'hour', handler })
+   * It is a mutation without a caller: `user` is null in its context, and nobody can call it.
+   * A run that was missed while the platform was down happens once when it is back.
+   */
+  export function schedule(definition: {
+    every: 'hour' | 'day' | 'week';
+    /** HH:MM, for 'day' and 'week'. */
+    at?: string;
+    /** For 'week'. */
+    on?: 'monday' | 'tuesday' | 'wednesday' | 'thursday' | 'friday' | 'saturday' | 'sunday';
+    handler: (context: Omit<Context, 'user'> & { user: null }) => unknown;
+  }): ServerFunction;
+
   /** Stops the function with a message meant for the person using the app. */
   export function fail(message: string, code?: string): never;
 

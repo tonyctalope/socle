@@ -9,6 +9,7 @@ const SERVER_STD = `
 const socle = globalThis.__socle;
 export const query = socle.query;
 export const mutation = socle.mutation;
+export const schedule = socle.schedule;
 export const v = socle.v;
 export const fail = socle.fail;
 export const UserError = socle.UserError;

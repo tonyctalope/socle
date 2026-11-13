@@ -69,6 +69,10 @@ the sandbox load: `src/kit`, `src/demo`).
 - `src/apps/slug.ts` — an app has **two addresses**: `<slug>.<APPS_DOMAIN>` and `<slug>--draft.<APPS_DOMAIN>`
   (`Site`). The label is what sessions, sign-on codes, notifications and the call gate are filed under, so the
   two never share anything; `c.get('site')` on an app host says which one a request is for.
+- `src/apps/scheduler.ts` — scheduled functions (`schedule({ every, at, on, handler })`): every minute, for the
+  published version of each app, the latest occurrence that has come is run once, as a mutation without a caller
+  (`user` null). The occurrence is written down (`app_schedules`) before the call; a schedule seen for the first
+  time starts with its next occurrence; screens and tools cannot call a scheduled function.
 - `src/apphost/calls.ts` — one call of a server function, for a screen (HTTP) or an agent (MCP): gate, database
   of the right address, log, live update, notifications.
 - `src/oauth/` — the authorization server MCP clients sign in with (OAuth 2.1, PKCE, dynamic registration and
@@ -99,7 +103,7 @@ A map of path → text (`src/runner/build/files.ts` checks its shape):
 - `web/main.tsx` — default-exports the root React component; the platform mounts it and writes the HTML document.
   May import `react`, `react-dom`, `@socle/sdk`, `@socle/ui`, and its own files in `web/` and `shared/`. Styling is
   Tailwind classes (+ optional `web/style.css`).
-- `server/index.ts` — exports `query(...)` and `mutation(...)` from `@socle/server`; imports only `server/` and
+- `server/index.ts` — exports `query(...)`, `mutation(...)` and `schedule(...)` from `@socle/server`; imports only `server/` and
   `shared/`. A function gets `{ db, user, members, now, today, locale, notify }` and its input (checked against `v.…`).
 - `migrations/NNN_name.sql` — applied once each, in name order, all new ones in one transaction.
 
@@ -256,4 +260,4 @@ Not reviewed yet: `src/mcp/app.ts` (per-app endpoints), app removal, `/connectio
    administration page where a person publishes.
 4. Done: one MCP server per app (functions marked `tool`), removing an app, connected applications, versions
    and return to an earlier one, access lists, per-app icons.
-5. Scheduled functions (`user` is null for those), then files and photos.
+5. Done: scheduled functions. Next: files and photos.

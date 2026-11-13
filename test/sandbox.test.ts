@@ -202,6 +202,7 @@ describe('server functions', () => {
         name: 'addExpense',
         kind: 'mutation',
         tool: 'Adds an expense to the shared account.',
+        schedule: null,
         input: {
           type: 'object',
           additionalProperties: false,
@@ -215,7 +216,7 @@ describe('server functions', () => {
           },
         },
       },
-      { name: 'total', kind: 'query', input: null, tool: null },
+      { name: 'total', kind: 'query', input: null, tool: null, schedule: null },
     ]);
   });
 

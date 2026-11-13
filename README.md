@@ -9,14 +9,15 @@ It is made for a few people who know each other: an allowlist of e-mail addresse
 
 ## Status
 
-| Step | What                                                                                   | State   |
-| ---- | -------------------------------------------------------------------------------------- | ------- |
-| 1    | Sign-in (OpenID Connect), one session per subdomain, PWA and notifications, a demo app | done    |
-| 2    | Apps built without `npm install`, one SQLite database per app, sandboxed functions     | done    |
-| 3    | Agents create apps over MCP: drafts, an administrator publishes                        | done    |
-| 4    | One MCP server per app (its functions as tools)                                        | done    |
-| 4b   | Versions and rollback, per-app icons and access lists                                  | done    |
-| 5    | Scheduled functions, files and photos                                                  | planned |
+| Step | What                                                                                   | State |
+| ---- | -------------------------------------------------------------------------------------- | ----- |
+| 1    | Sign-in (OpenID Connect), one session per subdomain, PWA and notifications, a demo app | done  |
+| 2    | Apps built without `npm install`, one SQLite database per app, sandboxed functions     | done  |
+| 3    | Agents create apps over MCP: drafts, an administrator publishes                        | done  |
+| 4    | One MCP server per app (its functions as tools)                                        | done  |
+| 4b   | Versions and rollback, per-app icons and access lists                                  | done  |
+| 5    | Scheduled functions                                                                    | done  |
+| 6    | Files and photos                                                                       | next  |
 
 ## How it works
 
@@ -91,6 +92,9 @@ export default function App() {
   );
 }
 ```
+
+A third kind of function runs by itself: `schedule({ every: 'day', at: '08:00', handler })` (or every hour, or
+every week on a given day), in the instance's timezone, for reminders and recurring entries.
 
 Each function runs in one transaction on the app's database: if it fails, nothing is written. After a successful
 change, every open page of the app reloads what it shows. `src/demo/` is a complete app written this way

@@ -116,6 +116,7 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
         name: info.name,
         kind: info.kind,
         offered_as_tool: info.tool !== null,
+        ...(info.schedule ? { runs: info.schedule } : {}),
       })),
       would_change_on_publication: deps.apps.changes(slug),
       next: status.draft.differs
@@ -316,7 +317,8 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
         version,
         info,
         inputJson,
-        caller: { id: caller.id, name: displayName(caller) },
+        // A scheduled function runs as the platform will run it: without a caller.
+        caller: info.schedule ? null : { id: caller.id, name: displayName(caller) },
       });
       if (result === 'busy' || result === 'gone') return text('The app is busy; try again in a moment.', true);
       if (result === 'unavailable') return text('The platform cannot run functions right now; try again later.', true);

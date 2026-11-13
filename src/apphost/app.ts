@@ -378,7 +378,10 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
     const site = c.get('site');
     const version = deps.apps.serving(row.slug, site.draft ? 'draft' : 'live');
     const info = version?.functions.get(c.req.param('name'));
-    if (!version?.bundleHash || !info) return problem(c, 404, 'unknown_function', t('Unknown function.'));
+    // What the platform runs on a schedule is nobody's to call.
+    if (!version?.bundleHash || !info || info.schedule) {
+      return problem(c, 404, 'unknown_function', t('Unknown function.'));
+    }
     const body = (await jsonBody(c)) as { input?: unknown; query?: unknown } | undefined;
     if (typeof body !== 'object' || body === null) return problem(c, 400, 'invalid_request', t('Invalid request.'));
     // A screen that only displays must never trigger a write by mistake.

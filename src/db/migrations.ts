@@ -140,4 +140,13 @@ export const MIGRATIONS: readonly string[] = [
   /* 8 — an app's own icon, rendered by the build in the sizes phones ask for (JSON: file name → base64 PNG) */ `
   ALTER TABLE app_versions ADD COLUMN icons TEXT;
   `,
+  /* 9 — scheduled functions: the last occurrence of each that was run (or first seen) */ `
+  CREATE TABLE app_schedules (
+    app TEXT NOT NULL REFERENCES apps(slug) ON DELETE CASCADE,
+    fn TEXT NOT NULL,
+    slot TEXT NOT NULL,
+    ran_at TEXT NOT NULL,
+    PRIMARY KEY (app, fn)
+  ) WITHOUT ROWID;
+  `,
 ];

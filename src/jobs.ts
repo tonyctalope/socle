@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs'
 import path from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { listApps } from './apps/registry.ts';
+import { runSchedules } from './apps/scheduler.ts';
 import { liveDatabase } from './apps/store.ts';
 import { purgeExpired } from './auth/sessions.ts';
 import { purgeClients } from './oauth/clients.ts';
@@ -109,8 +110,21 @@ export function startJobs(deps: Deps): () => void {
   };
   const first = setTimeout(tick, 5_000);
   const timer = setInterval(tick, 10 * 60_000);
+  // Scheduled functions of the apps: looked at every minute, one round at a time.
+  let scheduling = false;
+  const schedules = setInterval(() => {
+    if (scheduling) return;
+    scheduling = true;
+    void runSchedules(deps)
+      .catch((error: unknown) => console.error('scheduled functions failed:', (error as Error).message))
+      .finally(() => {
+        scheduling = false;
+      });
+  }, 60_000);
+  schedules.unref();
   return () => {
     clearTimeout(first);
     clearInterval(timer);
+    clearInterval(schedules);
   };
 }

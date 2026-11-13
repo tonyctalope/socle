@@ -68,6 +68,13 @@ export const add = mutation({
   (\`mcp_url\` in \`list_apps\`) that a member connects like this builder. Mark the few functions that make sense
   in a conversation ("add milk to the list", "what is due this week?"), give each input a \`.describe()\`, and
   return what an assistant needs to answer. A tool's input is \`v.object({ … })\` or nothing.
+- \`schedule({ every: 'day', at: '08:00', handler })\` (import it from \`@socle/server\` like \`query\`) is a function
+  the platform runs by itself, once published: \`{ every: 'hour' }\`, \`{ every: 'day', at: 'HH:MM' }\` or
+  \`{ every: 'week', on: 'monday', at: 'HH:MM' }\`, in the instance's timezone. It is a mutation with no input and
+  no caller (\`user\` is null; \`notify('all', …)\` reaches everyone): reminders, recurring entries, clean-up. An
+  occurrence missed while the platform was down runs once afterwards, so write it to be safe to run late (decide
+  from \`today\` and what the database holds, not from "it is 08:00"). Screens cannot call it; \`call_function\`
+  can, on the draft, to test it. Ten per app at most.
 - \`console.log\` lines go to the app's log (\`read_logs\`).
 - A function has a couple of seconds, a bounded memory, and nothing but its database: no network, no files, no
   timers, no state kept between calls. Dates: use \`now\`/\`today\` from the context.
