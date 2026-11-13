@@ -144,7 +144,13 @@ describe('the platform’s own words', () => {
 
   it('has a French sentence for everything the server says, and none that the code no longer uses', () => {
     const used = new Set<string>();
-    for (const file of ['src/control/app.ts', 'src/apphost/app.ts', 'src/apphost/shell.ts', 'src/auth/oidc.ts']) {
+    for (const file of [
+      'src/control/app.ts',
+      'src/control/admin.ts',
+      'src/apphost/app.ts',
+      'src/apphost/shell.ts',
+      'src/auth/oidc.ts',
+    ]) {
       const source = readFileSync(file, 'utf8');
       for (const match of source.matchAll(/\bt\(\s*'((?:[^'\\]|\\.)*)'/g)) used.add(match[1]!);
     }

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { all } from '../src/db/database.ts';
 import { DEFAULT_LIMITS } from '../src/runner/limits.ts';
-import { BOB, Browser, CONTROL, setup, signIn, type TestContext } from './helpers.ts';
+import { ALICE, BOB, Browser, CONTROL, setup, signIn, type TestContext } from './helpers.ts';
 
 // A draft is what agents edit. It is built and served apart from the published version:
 // its own address, its own sessions, its own database. Members only get it once it is published.
@@ -232,6 +232,65 @@ describe('a draft, from the first file to its publication', () => {
     assert.equal(versions.filter((version) => version.published_at !== null).length, 2);
     assert.equal(versions.filter((version) => version.published_at === null).length, 1);
     assert.equal(versions.at(-1)!.id, apps().status('tasks')!.draft.versionId);
+  });
+});
+
+describe('publishing is an administrator’s decision', () => {
+  it('shows the drafts to administrators only, and publishes from a form of the control plane', async () => {
+    const ctx = setup({ limits: TEST_LIMITS });
+    try {
+      const admin = new Browser(ctx.app);
+      const member = new Browser(ctx.app);
+      const { userId } = signIn(ctx, admin, BOB); // the first allowed address administers the instance
+      signIn(ctx, member, ALICE);
+      ctx.deps.apps.create('tasks', { name: 'Tasks', description: '' }, { id: userId });
+      assert.ok((await ctx.deps.apps.saveDraft('tasks', tasks(), { id: userId })).ok);
+
+      assert.equal((await member.request(`${CONTROL}/admin/`)).status, 403);
+      assert.doesNotMatch(await (await member.request(`${CONTROL}/`)).text(), /\/admin\//);
+      const anonymous = await new Browser(ctx.app).request(`${CONTROL}/admin/`);
+      assert.equal(anonymous.status, 302);
+      assert.match(await (await admin.request(`${CONTROL}/`)).text(), /href="\/admin\/"/);
+      const page = await (await admin.request(`${CONTROL}/admin/`)).text();
+      assert.match(page, /Tasks[\s\S]*Never published[\s\S]*https:\/\/tasks--draft\.apps\.test\//);
+      assert.match(page, /\+ server\/index\.ts/);
+      assert.match(page, /action="\/admin\/apps\/tasks\/publish"/);
+      assert.doesNotMatch(page, /<script/i);
+
+      const post = (browser: Browser, path: string, origin = CONTROL) =>
+        browser.request(`${CONTROL}${path}`, { method: 'POST', headers: { origin } });
+      // Neither a member, nor a page of an app, nor a request without its origin publishes.
+      assert.equal((await post(member, '/admin/apps/tasks/publish')).status, 403);
+      assert.equal((await post(admin, '/admin/apps/tasks/publish', 'https://tasks--draft.apps.test')).status, 403);
+      assert.equal((await admin.request(`${CONTROL}/admin/apps/tasks/publish`, { method: 'POST' })).status, 403);
+      assert.equal(ctx.deps.apps.status('tasks')!.live, null);
+
+      const published = await post(admin, '/admin/apps/tasks/publish');
+      assert.equal(published.status, 303);
+      assert.match(published.headers.get('location')!, /^\/admin\/\?published=Tasks$/);
+      assert.ok(ctx.deps.apps.status('tasks')!.live);
+      assert.equal((await post(admin, '/admin/apps/nope/publish')).status, 404);
+
+      // An edit that is given up: the draft is the published version again.
+      const edited = tasks({ 'shared/note.ts': 'export const note = 1;' });
+      assert.ok((await ctx.deps.apps.saveDraft('tasks', edited, { id: userId })).ok);
+      assert.match(await (await admin.request(`${CONTROL}/admin/`)).text(), /\+ shared\/note\.ts/);
+      assert.equal((await post(admin, '/admin/apps/tasks/discard')).status, 303);
+      const status = ctx.deps.apps.status('tasks')!;
+      assert.equal(status.draft.differs, false);
+      assert.equal(status.draft.versionId, status.live?.versionId);
+      assert.deepEqual(ctx.deps.apps.files('tasks', 'draft'), tasks());
+
+      // A draft the published data refuses: said on the page, and members keep what they had.
+      const clash = tasks({ 'migrations/001_init.sql': 'CREATE TABLE tasks (id INTEGER PRIMARY KEY, other TEXT);' });
+      assert.ok((await ctx.deps.apps.saveDraft('tasks', clash, { id: userId }, { resetData: true })).ok);
+      const refused = await post(admin, '/admin/apps/tasks/publish');
+      assert.equal(refused.status, 409);
+      assert.match(await refused.text(), /Nothing changed for the members\./);
+      assert.equal(ctx.deps.apps.status('tasks')!.live?.versionId, status.live?.versionId);
+    } finally {
+      ctx.cleanup();
+    }
   });
 });
 

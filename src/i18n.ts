@@ -49,6 +49,22 @@ const FR: Record<string, string> = {
   'Page not found': 'Page introuvable',
   'This page does not exist.': 'Cette page n’existe pas.',
 
+  // Administration
+  Administration: 'Administration',
+  'Only an administrator can open this page.': 'Seul un administrateur peut ouvrir cette page.',
+  '{name} is published.': '{name} est publiée.',
+  'The draft of {name} was discarded.': 'Le brouillon de {name} a été abandonné.',
+  Published: 'Publiée',
+  'Never published': 'Jamais publiée',
+  'Open the draft': 'Ouvrir le brouillon',
+  'No draft': 'Pas de brouillon',
+  'The draft does not build:': 'Le brouillon ne se construit pas :',
+  'What publishing would change': 'Ce que la publication changerait',
+  'Publish the draft': 'Publier le brouillon',
+  'Discard the draft': 'Abandonner le brouillon',
+  'Not published': 'Non publiée',
+  'Nothing changed for the members.': 'Rien n’a changé pour les membres.',
+
   // App hosts
   'There is no app at this address.': 'Aucune appli à cette adresse.',
   'You are signed out.': 'Vous êtes déconnecté.',

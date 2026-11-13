@@ -542,6 +542,30 @@ export class AppStore {
     });
   }
 
+  /** Gives up the draft's edits: the draft is the published version again. */
+  discardDraft(slug: string): void {
+    transaction(this.db, () => {
+      run(this.db, 'DELETE FROM app_drafts WHERE app = :slug', { slug });
+      run(this.db, 'UPDATE apps SET draft_version = live_version WHERE slug = :slug', { slug });
+      this.prune(slug);
+    });
+    this.onDraft(slug);
+  }
+
+  /** The files publishing the draft would add, change or remove. Null when the app does not exist. */
+  changes(slug: string): { added: string[]; changed: string[]; removed: string[] } | null {
+    const draft = this.files(slug, 'draft');
+    if (!draft) return null;
+    const live = this.files(slug, 'live') ?? {};
+    const names = (keep: (name: string) => boolean, from: Record<string, string>) =>
+      Object.keys(from).filter(keep).sort();
+    return {
+      added: names((name) => !Object.hasOwn(live, name), draft),
+      changed: names((name) => Object.hasOwn(live, name) && live[name] !== draft[name], draft),
+      removed: names((name) => !Object.hasOwn(draft, name), live),
+    };
+  }
+
   /** Where an app stands, for the people and agents who work on it. */
   status(slug: string): AppStatus | null {
     const app = get<{

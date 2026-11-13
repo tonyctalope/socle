@@ -26,7 +26,8 @@ import { clientIp, isSameOrigin, isTopLevelNavigation, RateLimiter, safeNextPath
 import { CONTROL_CSP, onError, securityHeaders } from '../lib/security.ts';
 import { loadStaticFiles } from '../lib/static.ts';
 import { messagePage, page } from '../pages/layout.ts';
-import { allowlist, type ControlEnv, type Deps } from '../types.ts';
+import { allowlist, isAdmin, type ControlEnv, type Deps } from '../types.ts';
+import { adminRoutes } from './admin.ts';
 
 /** Long enough for the way back to an app page (its path, encoded once more). */
 const NEXT_MAX = 1500;
@@ -119,6 +120,11 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
           <p class="muted">
             ${t('To install an app on your phone, open it, then choose “Add to Home Screen” in the browser menu.')}
           </p>
+          ${
+            isAdmin(config, session.user)
+              ? html`<p class="actions"><a class="button secondary" href="/admin/">${t('Administration')}</a></p>`
+              : ''
+          }
           <form class="actions" method="post" action="/auth/logout">
             <button class="secondary" type="submit">${t('Sign out')}</button>
           </form>`,
@@ -229,6 +235,8 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
       return c.redirect(next, 303);
     });
   }
+
+  app.route('/', adminRoutes(deps));
 
   // Sign-on towards an app host: see src/auth/sso.ts for the whole flow.
   app.get('/sso/start', (c) => {
