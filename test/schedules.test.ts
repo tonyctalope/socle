@@ -46,6 +46,23 @@ describe('when a schedule is due', () => {
     assert.equal(slotOf(weekly, 'Europe/Paris', paris('2027-01-15T12:00:00Z')), '2027-01-11');
     assert.equal(slotOf(weekly, 'Europe/Paris', paris('2027-01-18T06:29:00Z')), '2027-01-11'); // Monday, 07:29
     assert.equal(slotOf(weekly, 'Europe/Paris', paris('2027-01-18T06:30:00Z')), '2027-01-18'); // Monday, 07:30
+    // The days the clocks change are 23 and 25 hours long: a day back is a date, not 24 hours.
+    // 2027-03-28, 02:00 becomes 03:00 in Paris. Half past midnight on Monday the 29th:
+    assert.equal(slotOf(daily, 'Europe/Paris', paris('2027-03-28T22:30:00Z')), '2027-03-28');
+    assert.equal(
+      slotOf({ every: 'week', on: 'sunday', at: '08:00' }, 'Europe/Paris', paris('2027-03-28T22:30:00Z')),
+      '2027-03-28',
+    );
+    // 2027-10-31, 03:00 becomes 02:00. At 23:30 that Sunday, 23:45 has not come.
+    const late = { every: 'day', at: '23:45' } as const;
+    assert.equal(slotOf(late, 'Europe/Paris', paris('2027-10-31T22:30:00Z')), '2027-10-30');
+    assert.equal(slotOf(late, 'Europe/Paris', paris('2027-10-31T22:45:00Z')), '2027-10-31');
+    assert.equal(
+      slotOf({ every: 'week', on: 'sunday', at: '23:45' }, 'Europe/Paris', paris('2027-10-31T22:30:00Z')),
+      '2027-10-24',
+    );
+    // Across a month and a year.
+    assert.equal(slotOf(daily, 'Europe/Paris', paris('2027-01-01T06:00:00Z')), '2026-12-31');
     // Later occurrences always sort after earlier ones.
     assert.ok(
       slotOf(daily, 'Europe/Paris', paris('2027-02-01T08:00:00Z')) >
@@ -153,6 +170,18 @@ describe('scheduled functions', () => {
       throw new (await import('../src/runner/client.ts')).RunnerUnavailable('closed', 'the runner is away');
     };
     try {
+      assert.equal(await runSchedules(ctx.deps), 0);
+    } finally {
+      runner.call = realCall;
+    }
+    // Every worker of the runner taken: the runner's client answers this, and nothing ran either.
+    runner.call = async () => ({
+      ok: false,
+      error: { code: 'busy', message: 'the platform is busy, try again in a moment' },
+      logs: [],
+    });
+    try {
+      assert.equal(await runSchedules(ctx.deps), 0);
       assert.equal(await runSchedules(ctx.deps), 0);
     } finally {
       runner.call = realCall;
