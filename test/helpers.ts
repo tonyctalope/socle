@@ -1,4 +1,3 @@
-import { siteOf } from '../src/apps/slug.ts';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -8,6 +7,8 @@ import { createApp } from '../src/app.ts';
 import { LiveHub } from '../src/apphost/live.ts';
 import type { VendorAsset } from '../src/apphost/vendor.ts';
 import { AppStore } from '../src/apps/store.ts';
+import { wireApps } from '../src/apps/wiring.ts';
+import { FileStore } from '../src/files/store.ts';
 import type { IdentityProvider } from '../src/auth/oidc.ts';
 import { CONTROL_SCOPE, createSession } from '../src/auth/sessions.ts';
 import { upsertUser } from '../src/auth/users.ts';
@@ -103,15 +104,8 @@ export function setup(
   const runner = localRunner({ appsDir: path.join(dataDir, 'apps'), limits: options.limits ?? DEFAULT_LIMITS });
   const apps = new AppStore(db, runner);
   const live = new LiveHub();
-  apps.onPublish = (slug) => live.publish(slug, 'version');
-  apps.onDraft = (slug) => live.publish(siteOf(slug, true).label, 'version');
-  apps.onRemove = (slug) => {
-    for (const draft of [false, true]) {
-      // Open pages learn they must reload, then their streams end.
-      live.publish(siteOf(slug, draft).label, 'version');
-      live.close(siteOf(slug, draft).label);
-    }
-  };
+  const files = new FileStore(db, dataDir);
+  wireApps(apps, live, files);
   publishFake(apps, 'demo', 'Demo');
   // A second app, registered but without a published version.
   run(db, `INSERT INTO apps (slug, name, created_at) VALUES ('notes', 'Notes', :now)`, {
@@ -126,6 +120,7 @@ export function setup(
     push,
     runner,
     apps,
+    files,
     live,
     vendor: fakeVendor,
     now: () => clock.now,

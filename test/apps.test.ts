@@ -638,13 +638,13 @@ describe('an app, from its sources to the browser', () => {
   it('ships a demo app that goes through the same build and sandbox', async () => {
     const outcome = await syncDemoApp(ctx.deps.db, ctx.deps.apps, true);
     assert.ok(outcome?.ok, JSON.stringify(outcome));
-    assert.deepEqual(outcome.applied, ['001_init.sql']);
+    assert.deepEqual(outcome.applied, ['001_init.sql', '002_photo.sql']);
     await bob.navigate(`${DEMO}/`);
     ctx.push.sent.length = 0;
     const added = await value(await call(bob, 'add', { input: { label: '  Du pain ' } }, DEMO));
     assert.deepEqual(added, { id: 1 });
     assert.deepEqual(await value(await call(bob, 'list', { query: true }, DEMO)), [
-      { id: 1, label: 'Du pain', done: 0, author: bobId },
+      { id: 1, label: 'Du pain', done: 0, author: bobId, photo: null },
     ]);
     assert.equal(await value(await call(bob, 'toggle', { input: { id: 1 } }, DEMO)), 1);
     assert.equal((await call(bob, 'add', { input: { label: '   ' } }, DEMO)).status, 422);

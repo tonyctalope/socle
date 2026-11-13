@@ -166,6 +166,12 @@ function invoke(name: string, contextJson: string, inputJson: string): string | 
     notify(to: unknown, message: unknown) {
       effects.push({ type: 'notify', to, message });
     },
+    /** The app's files (photos, documents). `files.remove(id)` deletes one once the call has succeeded. */
+    files: Object.freeze({
+      remove(id: unknown) {
+        effects.push({ type: 'removeFile', id });
+      },
+    }),
   });
   // The value travels as text from here to the browser: nothing in between has to rebuild it.
   const finish = (value: unknown) => toJson({ value: toJson(value === undefined ? null : value), effects });

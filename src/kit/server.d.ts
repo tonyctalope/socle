@@ -36,6 +36,11 @@ declare module '@socle/server' {
     today: string;
     /** The language the instance is set to ("en", "fr"…): the same value as `locale` in `@socle/sdk`. */
     locale: string;
+    /**
+     * The files members added through the app's screens (`files.upload` in `@socle/sdk`): the app keeps
+     * their ids. `files.remove(id)` deletes one, once the mutation has succeeded.
+     */
+    files: { remove(id: string): void };
     /** Sends a notification once the mutation has succeeded. */
     notify(to: number | number[] | 'others' | 'all', message: { title: string; body?: string; url?: string }): void;
   }

@@ -149,4 +149,16 @@ export const MIGRATIONS: readonly string[] = [
     PRIMARY KEY (app, fn)
   ) WITHOUT ROWID;
   `,
+  /* 10 — the files members add to an app (photos, documents), filed under one of its two addresses */ `
+  CREATE TABLE app_files (
+    id TEXT PRIMARY KEY,
+    site TEXT NOT NULL,
+    app TEXT NOT NULL REFERENCES apps(slug) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    type TEXT NOT NULL,
+    bytes INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX app_files_site ON app_files(site);
+  `,
 ];

@@ -119,6 +119,8 @@ export class AppStore {
   onPublish: (slug: string) => void = () => {};
   /** Called after an app's draft was built again. */
   onDraft: (slug: string) => void = () => {};
+  /** Called after a draft's database was emptied: what its old data named is of no use any more. */
+  onDraftReset: (slug: string) => void = () => {};
   /** Called after an app was removed: its two addresses no longer serve anything. */
   onRemove: (slug: string) => void = () => {};
   /** One build or publication at a time per app: the second waits for the first. */
@@ -597,6 +599,7 @@ export class AppStore {
       remember(migrated.problems);
       return migrated;
     }
+    if (options.resetData) this.onDraftReset(slug);
     if (app.draft_version && this.same(app.draft_version, files, built)) {
       remember(null);
       return { ok: true, versionId: app.draft_version, unchanged: true, applied: migrated.applied };
@@ -680,6 +683,7 @@ export class AppStore {
         true,
       );
       if (!migrated.ok) return migrated;
+      this.onDraftReset(slug);
       transaction(this.db, () => {
         run(this.db, 'DELETE FROM app_drafts WHERE app = :slug', { slug });
         run(this.db, 'UPDATE apps SET draft_version = live_version WHERE slug = :slug', { slug });

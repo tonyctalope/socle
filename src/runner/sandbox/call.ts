@@ -53,6 +53,9 @@ export type CallRequest = Omit<Invocation, 'bundle' | 'input' | 'inputJson'> & {
 };
 
 /** A notification the function asked for; sent by the web side once the call has succeeded. */
+/** What a mutation asks the platform to do once it has succeeded. */
+export type Effect = NotifyEffect | { type: 'removeFile'; id: string };
+
 export interface NotifyEffect {
   type: 'notify';
   to: number[] | 'others' | 'all';
@@ -63,7 +66,7 @@ export interface NotifyEffect {
 
 export type CallResult =
   /** `json` is what the function returned, as JSON text: it goes to the browser as it is. */
-  | { ok: true; kind: 'query' | 'mutation'; json: string; effects: NotifyEffect[]; logs: string[] }
+  | { ok: true; kind: 'query' | 'mutation'; json: string; effects: Effect[]; logs: string[] }
   | { ok: false; error: { code: string; message: string }; logs: string[] };
 
 export interface FunctionInfo {
@@ -195,12 +198,22 @@ function printable(text: string): string {
   return text.replace(CONTROL, ' ');
 }
 
-function readEffects(raw: unknown, limits: Limits): NotifyEffect[] {
+function readEffects(raw: unknown, limits: Limits): Effect[] {
   if (!Array.isArray(raw)) return [];
   if (raw.length > limits.maxEffects) {
-    throw new GuestFailure('error', `a function may send at most ${limits.maxEffects} notifications per call`);
+    throw new GuestFailure(
+      'error',
+      `a function may ask for at most ${limits.maxEffects} notifications and file removals per call`,
+    );
   }
-  return raw.map((item) => {
+  return raw.map((item): Effect => {
+    if ((item as { type?: unknown } | null)?.type === 'removeFile') {
+      const id = (item as { id?: unknown }).id;
+      if (typeof id !== 'string' || !/^[0-9a-f]{32}$/.test(id)) {
+        throw new GuestFailure('error', 'files.remove(id): the id of a file, as files.upload() gave it');
+      }
+      return { type: 'removeFile', id };
+    }
     const effect = item as { to?: unknown; message?: { title?: unknown; body?: unknown; url?: unknown } };
     const { to, message } = effect;
     const ids = typeof to === 'number' ? [to] : to;
@@ -322,7 +335,7 @@ export async function callFunction(databases: AppDatabases, request: Invocation,
     const answer = sandbox.call('__invoke', [request.fn, context, input], limits.maxResultBytes);
     connection = undefined;
     let json: string;
-    let effects: NotifyEffect[];
+    let effects: Effect[];
     try {
       const parsed = JSON.parse(answer) as { value?: unknown; effects?: unknown };
       if (typeof parsed.value !== 'string') throw new Error('no value');

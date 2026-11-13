@@ -75,6 +75,9 @@ export const add = mutation({
   occurrence missed while the platform was down runs once afterwards, so write it to be safe to run late (decide
   from \`today\` and what the database holds, not from "it is 08:00"). Screens cannot call it; \`call_function\`
   can, on the draft, to test it. Ten per app at most.
+- Photos and documents: a screen sends the file to the platform and gets an id (see \`files\` below); pass the id
+  to a mutation and store it in a TEXT column. \`files.remove(id)\` in the handler's context deletes the file once
+  the mutation has succeeded: call it when the row that names the file goes.
 - \`console.log\` lines go to the app's log (\`read_logs\`).
 - A function has a couple of seconds, a bounded memory, and nothing but its database: no network, no files, no
   timers, no state kept between calls. Dates: use \`now\`/\`today\` from the context.
@@ -115,6 +118,9 @@ export default function App() {
   successful mutation of the app, on every open phone: screens stay in sync without any code.
 - \`api.<name>(input)\` calls any function and returns a promise of its result; it rejects with an \`ApiError\`
   (\`message\`, \`code\`, \`status\`).
+- \`files.uploadImage(file)\` → \`{ id, url, type, bytes }\` sends a photo picked from the camera or the gallery,
+  made smaller first; \`files.upload(file)\` sends a file as it is (JPEG, PNG, WebP, GIF or PDF, 8 MB at most);
+  \`files.url(id)\` is its address, for \`<img src>\` or a link. Files are kept per app and only its members see them.
 - \`useMe()\` → \`{ user, app: { slug, name }, members }\` (ids are numbers); \`logout()\`; \`locale\`; \`words({ en: {…}, fr: {…} })\` picks texts for the
   instance's language; \`install.standalone()\`; \`usePush()\` / \`push\` for notification settings.
 
@@ -124,6 +130,8 @@ export default function App() {
 \`Field({ label, hint?, error?, children })\`, \`Input\`, \`Textarea\`, \`Select\`, \`Checkbox({ label, … })\`,
 \`List\`, \`ListItem({ end?, onClick?, children })\`, \`Badge({ tone?: 'neutral' | 'accent' | 'ok' | 'warn' | 'danger' })\`,
 \`Empty({ title, children? })\`, \`Spinner({ label? })\`, \`ErrorNote\`, \`Avatar({ name })\`,
+\`PhotoButton({ onPhoto, children? })\` (takes or picks a photo and sends it; \`onPhoto\` gets \`{ id, url }\`),
+\`Photo({ id, alt?, className? })\` (shows one from its id),
 \`NotificationSettings()\` (a ready-made card, titled, to turn notifications on: place it as it is, not inside
 a \`Card\`; every app that notifies needs it somewhere),
 \`LogoutButton()\`.

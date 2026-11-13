@@ -8,8 +8,10 @@ import {
   type SelectHTMLAttributes,
   type TextareaHTMLAttributes,
   useId,
+  useRef,
+  useState,
 } from 'react';
-import { logout, usePush, words } from '@socle/sdk';
+import { files, logout, usePush, words, type UploadedFile } from '@socle/sdk';
 
 const TEXT = words({
   en: {
@@ -23,6 +25,8 @@ const TEXT = words({
     turnOff: 'Turn notifications off',
     test: 'Send a test notification',
     signOut: 'Sign out',
+    addPhoto: 'Add a photo',
+    sending: 'Sending…',
   },
   fr: {
     loading: 'Chargement…',
@@ -35,6 +39,8 @@ const TEXT = words({
     turnOff: 'Désactiver les notifications',
     test: 'Envoyer une notification de test',
     signOut: 'Se déconnecter',
+    addPhoto: 'Ajouter une photo',
+    sending: 'Envoi…',
   },
 });
 
@@ -270,6 +276,69 @@ export function NotificationSettings() {
         <ErrorNote>{error}</ErrorNote>
       </div>
     </Card>
+  );
+}
+
+/**
+ * A button that takes or picks a photo and sends it to the platform, made smaller first.
+ * `onPhoto` gets the file once it is kept: store its `id` with a function of the app.
+ */
+export function PhotoButton(props: {
+  onPhoto: (photo: UploadedFile) => void;
+  children?: ReactNode;
+  variant?: keyof typeof BUTTON_VARIANTS;
+  /** Longer side of the picture that is kept, in pixels (1600 by default). */
+  maxEdge?: number;
+  className?: string;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const pick = async (file: File | undefined) => {
+    if (!file) return;
+    setBusy(true);
+    setError(null);
+    try {
+      props.onPhoto(await files.uploadImage(file, { maxEdge: props.maxEdge }));
+    } catch (failure) {
+      setError((failure as Error).message);
+    } finally {
+      setBusy(false);
+      // The same photo can be picked again.
+      if (input.current) input.current.value = '';
+    }
+  };
+  return (
+    <div className="flex flex-col gap-2">
+      <input
+        ref={input}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(event) => void pick(event.target.files?.[0])}
+      />
+      <Button
+        variant={props.variant ?? 'secondary'}
+        className={props.className}
+        disabled={busy}
+        onClick={() => input.current?.click()}
+      >
+        {busy ? TEXT.sending : (props.children ?? TEXT.addPhoto)}
+      </Button>
+      <ErrorNote>{error}</ErrorNote>
+    </div>
+  );
+}
+
+/** A photo kept by the platform, from the id the app stored. */
+export function Photo(props: { id: string; alt?: string; className?: string }) {
+  return (
+    <img
+      src={files.url(props.id)}
+      alt={props.alt ?? ''}
+      loading="lazy"
+      className={cx('rounded-xl object-cover', props.className)}
+    />
   );
 }
 

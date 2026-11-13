@@ -158,6 +158,10 @@ const FR: Record<string, string> = {
   'The app took too long to answer.': 'L’appli a mis trop de temps à répondre.',
   'The app is busy. Try again in a moment.': 'L’appli est occupée. Réessayez dans un instant.',
   'The service is temporarily unavailable.': 'Le service est momentanément indisponible.',
+  'This file is too large ({limit} MB at most).': 'Ce fichier est trop volumineux ({limit} Mo au plus).',
+  'This app has no room left for files.': 'Cette appli n’a plus de place pour des fichiers.',
+  'Only pictures (JPEG, PNG, WebP, GIF) and PDF files are kept.':
+    'Seules les images (JPEG, PNG, WebP, GIF) et les fichiers PDF sont conservés.',
 };
 
 const TABLES: Record<Locale, Record<string, string> | null> = { en: null, fr: FR };

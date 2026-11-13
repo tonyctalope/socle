@@ -4,7 +4,7 @@ import { draftDatabase, liveDatabase, type AppVersion } from '../apps/store.ts';
 import { localDate } from '../config.ts';
 import { RateLimiter } from '../lib/http.ts';
 import { RunnerUnavailable } from '../runner/client.ts';
-import type { CallResult, FunctionInfo, NotifyEffect } from '../runner/sandbox/call.ts';
+import type { CallResult, Effect, FunctionInfo } from '../runner/sandbox/call.ts';
 import { allowlist, type Deps } from '../types.ts';
 import { CallGate } from './gate.ts';
 
@@ -57,7 +57,8 @@ function createCaller(deps: Deps): FunctionCaller {
   const notifyLimiter = new RateLimiter(30, 60_000);
 
   /** Sends what a mutation asked for, to members of this app only. */
-  const notify = (app: AppRow, site: Site, callerId: number | null, effects: NotifyEffect[]) => {
+  const notify = (app: AppRow, site: Site, callerId: number | null, all: Effect[]) => {
+    const effects = all.filter((effect) => effect.type === 'notify');
     if (effects.length === 0) return;
     const members = appMembers(db, app, isAllowed).map((member) => member.id);
     for (const [index, effect] of effects.entries()) {
@@ -139,6 +140,9 @@ function createCaller(deps: Deps): FunctionCaller {
       deps.live.publish(site.label, 'change', { client: client && /^[a-z0-9]{1,40}$/.test(client) ? client : '' });
       // Without a caller, "others" is everyone.
       notify(app, site, caller?.id ?? null, result.effects);
+      // Files the function no longer wants: only ever those of its own address.
+      const unwanted = result.effects.flatMap((effect) => (effect.type === 'removeFile' ? [effect.id] : []));
+      if (unwanted.length > 0) deps.files.remove(site, unwanted);
     }
     return result;
   };

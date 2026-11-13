@@ -105,6 +105,7 @@ export function startJobs(deps: Deps): () => void {
     try {
       purgeExpired(deps.db);
       purgeOAuth(deps.db);
+      deps.files.purge();
       purgeClients(deps.db);
       const now = deps.now().toISOString();
       const today = now.slice(0, 10);

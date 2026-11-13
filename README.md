@@ -17,7 +17,7 @@ It is made for a few people who know each other: an allowlist of e-mail addresse
 | 4    | One MCP server per app (its functions as tools)                                        | done  |
 | 4b   | Versions and rollback, per-app icons and access lists                                  | done  |
 | 5    | Scheduled functions                                                                    | done  |
-| 6    | Files and photos                                                                       | next  |
+| 6    | Files and photos                                                                       | done  |
 
 ## How it works
 
@@ -92,6 +92,11 @@ export default function App() {
   );
 }
 ```
+
+Photos and documents are kept by the platform: a screen sends the file (`files.uploadImage(file)`, or the
+ready-made `<PhotoButton>`, which makes a phone's photo smaller first) and the app stores the id it gets back;
+`<Photo id={…} />` shows it. Pictures (JPEG, PNG, WebP, GIF) and PDF files, 8 MB each, 1 GB per app, visible to
+the members of that app only.
 
 A third kind of function runs by itself: `schedule({ every: 'day', at: '08:00', handler })` (or every hour, or
 every week on a given day), in the instance's timezone, for reminders and recurring entries.
@@ -216,7 +221,8 @@ Settings worth knowing:
 | `OIDC_NAME`      | What the sign-in button calls the provider (“Sign in with Google”) | —       |
 | `DEMO_APP`       | Serves the demo app on `demo.<APPS_DOMAIN>`                        | off     |
 
-The platform's database is `data/socle.db`, each app's is `data/apps/<app>/live.db`. A copy of each is written every
+The platform's database is `data/socle.db`, each app's is `data/apps/<app>/live.db`, and the files members add
+are in `data/files/<app>/` (not part of the nightly copies: back the folder up with the rest of `data/`). A copy of each is written every
 night (`data/backups/` and `data/apps/<app>/backups/`, 14 kept).
 
 ## Updates

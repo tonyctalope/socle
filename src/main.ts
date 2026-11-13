@@ -1,4 +1,3 @@
-import { siteOf } from './apps/slug.ts';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { serve } from '@hono/node-server';
@@ -7,9 +6,11 @@ import { LiveHub } from './apphost/live.ts';
 import { VendorCache } from './apphost/vendor.ts';
 import { syncDemoApp } from './apps/demo.ts';
 import { AppStore } from './apps/store.ts';
+import { wireApps } from './apps/wiring.ts';
 import { createOidcProvider } from './auth/oidc.ts';
 import { appOrigin, ConfigError, loadConfig, type Config } from './config.ts';
 import { openDatabase } from './db/database.ts';
+import { FileStore } from './files/store.ts';
 import { startJobs } from './jobs.ts';
 import { createPushService } from './push/push.ts';
 import { localRunner, remoteRunner } from './runner/client.ts';
@@ -35,17 +36,9 @@ const runner = config.runnerSocket
   ? remoteRunner(config.runnerSocket, DEFAULT_LIMITS)
   : localRunner({ appsDir: path.join(config.dataDir, 'apps'), limits: DEFAULT_LIMITS });
 const apps = new AppStore(db, runner);
+const files = new FileStore(db, config.dataDir);
 const live = new LiveHub();
-// Open pages of an app reload when a new version of it is published.
-apps.onPublish = (slug) => live.publish(slug, 'version');
-apps.onDraft = (slug) => live.publish(siteOf(slug, true).label, 'version');
-apps.onRemove = (slug) => {
-  for (const draft of [false, true]) {
-    // Open pages learn they must reload, then their streams end.
-    live.publish(siteOf(slug, draft).label, 'version');
-    live.close(siteOf(slug, draft).label);
-  }
-};
+wireApps(apps, live, files);
 const deps: Deps = {
   config,
   db,
@@ -53,6 +46,7 @@ const deps: Deps = {
   push: createPushService(db, config),
   runner,
   apps,
+  files,
   live,
   vendor: new VendorCache(runner),
   now: () => new Date(),
