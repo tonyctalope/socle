@@ -64,6 +64,15 @@ const FR: Record<string, string> = {
   'Discard the draft': 'Abandonner le brouillon',
   'Not published': 'Non publiée',
   'Nothing changed for the members.': 'Rien n’a changé pour les membres.',
+  '{name} was removed.': '{name} a été supprimée.',
+  'Remove this app…': 'Supprimer cette appli…',
+  'Remove {name}?': 'Supprimer {name} ?',
+  'The app disappears for everyone, with its draft and everything people put in it. Its data stays on the server for a month, out of reach of the app, then is deleted.':
+    'L’appli disparaît pour tout le monde, avec son brouillon et tout ce que les membres y ont mis. Ses données restent un mois sur le serveur, hors de portée de l’appli, puis sont supprimées.',
+  'Remove {name}': 'Supprimer {name}',
+  Cancel: 'Annuler',
+  'Not removed': 'Non supprimée',
+  'The app is still there, unchanged.': 'L’appli est toujours là, inchangée.',
 
   // OAuth (MCP clients)
   'Authorize access': 'Autoriser l’accès',
@@ -101,6 +110,15 @@ const FR: Record<string, string> = {
   'the app builder': 'l’atelier des applis',
   'It will be able to create apps and change their drafts. It cannot publish: an administrator does.':
     'Elle pourra créer des applis et modifier leurs brouillons. Elle ne peut pas publier : un administrateur s’en charge.',
+
+  // Connected applications
+  'Connected applications': 'Applications connectées',
+  'The applications you allowed to act here in your name.':
+    'Les applications que vous avez autorisées à agir ici en votre nom.',
+  'No application is connected.': 'Aucune application n’est connectée.',
+  'last used on {date}': 'dernière utilisation le {date}',
+  'never used': 'jamais utilisée',
+  Disconnect: 'Déconnecter',
 
   // App hosts
   'There is no app at this address.': 'Aucune appli à cette adresse.',

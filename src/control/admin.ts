@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { html } from 'hono/html';
-import { listApps } from '../apps/registry.ts';
+import { DEMO_SLUG, listApps } from '../apps/registry.ts';
 import { siteOf } from '../apps/slug.ts';
 import { appOrigin } from '../config.ts';
 import { translator } from '../i18n.ts';
@@ -36,12 +36,17 @@ export function adminRoutes(deps: Deps): Hono<ControlEnv> {
 
   app.get('/admin', (c) => c.redirect('/admin/', 302));
 
+  // The demo app comes back at every start while DEMO_APP is on: removing it would be undone.
+  const removable = (slug: string) => !(config.demoApp && slug === DEMO_SLUG);
+
   app.get('/admin/', (c) => {
     const notice = c.req.query('published')
       ? t('{name} is published.', { name: c.req.query('published')! })
       : c.req.query('discarded')
         ? t('The draft of {name} was discarded.', { name: c.req.query('discarded')! })
-        : null;
+        : c.req.query('removed')
+          ? t('{name} was removed.', { name: c.req.query('removed')! })
+          : null;
     const rows = listApps(db).map((row) => ({
       row,
       status: deps.apps.status(row.slug)!,
@@ -103,9 +108,36 @@ export function adminRoutes(deps: Deps): Hono<ControlEnv> {
                       }`
                   : ''
               }
+              ${
+                removable(row.slug)
+                  ? html`<p class="muted"><a href="/admin/apps/${row.slug}/remove">${t('Remove this app…')}</a></p>`
+                  : ''
+              }
             </section>`;
           })}
           <p class="actions"><a class="button secondary" href="/">${t('Home')}</a></p>`,
+      ),
+    );
+  });
+
+  // Removing asks twice: this page, then its button.
+  app.get('/admin/apps/:slug/remove', (c) => {
+    const status = deps.apps.status(c.req.param('slug'));
+    if (!status || !removable(status.slug)) return c.text('Not found', 404);
+    return c.html(
+      page(
+        config.locale,
+        t('Remove {name}?', { name: status.name }),
+        html`<h1>${t('Remove {name}?', { name: status.name })}</h1>
+          <p>
+            ${t(
+              'The app disappears for everyone, with its draft and everything people put in it. Its data stays on the server for a month, out of reach of the app, then is deleted.',
+            )}
+          </p>
+          <form class="actions" method="post" action="/admin/apps/${status.slug}/remove">
+            <button class="danger" type="submit">${t('Remove {name}', { name: status.name })}</button>
+          </form>
+          <p class="actions"><a class="button secondary" href="/admin/">${t('Cancel')}</a></p>`,
       ),
     );
   });
@@ -116,8 +148,18 @@ export function adminRoutes(deps: Deps): Hono<ControlEnv> {
     const slug = c.req.param('slug');
     const action = c.req.param('action');
     const status = deps.apps.status(slug);
-    if (!status || (action !== 'publish' && action !== 'discard')) return c.text('Not found', 404);
+    if (!status || !['publish', 'discard', 'remove'].includes(action)) return c.text('Not found', 404);
     const back = { href: '/admin/', label: t('Administration') };
+    if (action === 'remove') {
+      if (!removable(slug)) return c.text('Not found', 404);
+      const removed = await deps.apps.remove(slug);
+      if (!removed.ok) {
+        console.warn(`[${slug}] removal refused: ${removed.message}`);
+        return c.html(messagePage(config.locale, t('Not removed'), t('The app is still there, unchanged.'), back), 409);
+      }
+      console.info(`[${slug}] removed by ${c.get('session')!.user.email}`);
+      return c.redirect(`/admin/?removed=${encodeURIComponent(status.name)}`, 303);
+    }
     if (action === 'discard') {
       deps.apps.discardDraft(slug);
       return c.redirect(`/admin/?discarded=${encodeURIComponent(status.name)}`, 303);

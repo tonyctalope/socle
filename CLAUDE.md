@@ -75,7 +75,10 @@ the sandbox load: `src/kit`, `src/demo`).
   client metadata documents). One server for every MCP endpoint; a token is bound to one resource.
 - `src/mcp/` — `http.ts` (an MCP endpoint behind those tokens), `builder.ts` (the tools that create and change
   apps, at `<CONTROL_URL>/mcp`), `guide.ts` (what an agent reads before writing an app: keep it exact).
-- `src/control/admin.ts` — `/admin/`: an administrator (`ADMIN_EMAILS`) publishes or discards drafts.
+- `src/control/admin.ts` — `/admin/`: an administrator (`ADMIN_EMAILS`) publishes or discards drafts, and removes
+  apps (the runner moves the app's folder to `<APPS_DIR>/.removed/` for a month; database handles notice a
+  replaced file, so an app created again under the same name starts empty).
+- `src/control/connections.ts` — `/connections`: a member's connected applications (OAuth grants), and "Disconnect".
 - `src/demo/` — the demo app, as the folder of sources an agent would send (`app.json`, `web/main.tsx`,
   `server/index.ts`, `migrations/*.sql`). It goes through the same build and sandbox as any app.
 - `src/runner/` — see below.

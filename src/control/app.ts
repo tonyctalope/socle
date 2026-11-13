@@ -32,6 +32,7 @@ import { builderResource, mcpCors, mcpEndpoint } from '../mcp/http.ts';
 import { protectedResourceMetadata } from '../oauth/metadata.ts';
 import { oauthRoutes } from '../oauth/routes.ts';
 import { adminRoutes } from './admin.ts';
+import { connectionRoutes } from './connections.ts';
 
 /** Long enough for the way back to an app page (its path, encoded once more). */
 const NEXT_MAX = 1500;
@@ -147,6 +148,7 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
               ? html`<p class="actions"><a class="button secondary" href="/admin/">${t('Administration')}</a></p>`
               : ''
           }
+          <p class="muted"><a href="/connections">${t('Connected applications')}</a></p>
           <form class="actions" method="post" action="/auth/logout">
             <button class="secondary" type="submit">${t('Sign out')}</button>
           </form>`,
@@ -260,9 +262,11 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
 
   app.route('/', adminRoutes(deps));
   // Which MCP endpoints exist, and who may get a token for each: only the builder for now.
+  const resourceCard = (resource: string) => (resource === builder ? builderCard() : null);
+  app.route('/', oauthRoutes(deps, resourceCard));
   app.route(
     '/',
-    oauthRoutes(deps, (resource) => (resource === builder ? builderCard() : null)),
+    connectionRoutes(deps, (resource) => resourceCard(resource)?.name ?? null),
   );
 
   // Sign-on towards an app host: see src/auth/sso.ts for the whole flow.

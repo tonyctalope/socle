@@ -39,6 +39,9 @@ const live = new LiveHub();
 // Open pages of an app reload when a new version of it is published.
 apps.onPublish = (slug) => live.publish(slug, 'version');
 apps.onDraft = (slug) => live.publish(siteOf(slug, true).label, 'version');
+apps.onRemove = (slug) => {
+  for (const draft of [false, true]) live.publish(siteOf(slug, draft).label, 'version');
+};
 const deps: Deps = {
   config,
   db,

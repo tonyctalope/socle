@@ -147,6 +147,7 @@ describe('the platform’s own words', () => {
     for (const file of [
       'src/control/app.ts',
       'src/control/admin.ts',
+      'src/control/connections.ts',
       'src/oauth/routes.ts',
       'src/oauth/pages.ts',
       'src/apphost/app.ts',

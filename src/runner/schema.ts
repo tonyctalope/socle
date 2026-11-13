@@ -96,65 +96,132 @@ function isRealDate(text: string): boolean {
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === text;
 }
 
+// What a refused value is told, in the instance's language: a screen may show it as it is.
+interface Words {
+  shape: string;
+  null: string;
+  boolean: string;
+  text: string;
+  oneOf: (values: string) => string;
+  empty: string;
+  minLength: (n: number) => string;
+  maxLength: (n: number) => string;
+  date: string;
+  number: string;
+  integer: string;
+  minimum: (n: number) => string;
+  maximum: (n: number) => string;
+  list: string;
+  minItems: (n: number) => string;
+  maxItems: (n: number) => string;
+  object: string;
+  unknown: string;
+  required: string;
+}
+
+const WORDS: Record<string, Words> = {
+  en: {
+    shape: 'no accepted shape',
+    null: 'expected null',
+    boolean: 'expected true or false',
+    text: 'expected text',
+    oneOf: (values) => `expected one of ${values}`,
+    empty: 'must not be empty',
+    minLength: (n) => `at least ${n} characters`,
+    maxLength: (n) => `at most ${n} characters`,
+    date: 'expected a date as YYYY-MM-DD',
+    number: 'expected a number',
+    integer: 'expected a whole number',
+    minimum: (n) => `must be at least ${n}`,
+    maximum: (n) => `must be at most ${n}`,
+    list: 'expected a list',
+    minItems: (n) => `at least ${n} item(s)`,
+    maxItems: (n) => `at most ${n} item(s)`,
+    object: 'expected an object',
+    unknown: 'unknown field',
+    required: 'required',
+  },
+  fr: {
+    shape: 'aucune forme acceptée',
+    null: 'null attendu',
+    boolean: 'vrai ou faux attendu',
+    text: 'texte attendu',
+    oneOf: (values) => `une de ces valeurs attendue : ${values}`,
+    empty: 'ne doit pas être vide',
+    minLength: (n) => `au moins ${n} caractères`,
+    maxLength: (n) => `au plus ${n} caractères`,
+    date: 'date attendue au format AAAA-MM-JJ',
+    number: 'nombre attendu',
+    integer: 'nombre entier attendu',
+    minimum: (n) => `doit valoir au moins ${n}`,
+    maximum: (n) => `doit valoir au plus ${n}`,
+    list: 'liste attendue',
+    minItems: (n) => `au moins ${n} élément(s)`,
+    maxItems: (n) => `au plus ${n} élément(s)`,
+    object: 'objet attendu',
+    unknown: 'champ inconnu',
+    required: 'obligatoire',
+  },
+};
+
 /** Null when `value` fits `schema`, else the first problem, written for whoever sent the value. */
-export function validate(schema: Schema, value: unknown, path = 'input'): string | null {
+export function validate(schema: Schema, value: unknown, path = 'input', locale = 'en'): string | null {
+  const say = WORDS[locale] ?? WORDS.en!;
   if ('anyOf' in schema) {
-    const problems = schema.anyOf.map((option) => validate(option, value, path));
-    return problems.includes(null) ? null : (problems[0] ?? `${path}: no accepted shape`);
+    const problems = schema.anyOf.map((option) => validate(option, value, path, locale));
+    return problems.includes(null) ? null : (problems[0] ?? `${path}: ${say.shape}`);
   }
   if (!('type' in schema)) return null;
   switch (schema.type) {
     case 'null':
-      return value === null ? null : `${path}: expected null`;
+      return value === null ? null : `${path}: ${say.null}`;
     case 'boolean':
-      return typeof value === 'boolean' ? null : `${path}: expected true or false`;
+      return typeof value === 'boolean' ? null : `${path}: ${say.boolean}`;
     case 'string': {
-      if (typeof value !== 'string') return `${path}: expected text`;
-      if (schema.enum && !schema.enum.includes(value)) return `${path}: expected one of ${schema.enum.join(', ')}`;
+      if (typeof value !== 'string') return `${path}: ${say.text}`;
+      if (schema.enum && !schema.enum.includes(value)) return `${path}: ${say.oneOf(schema.enum.join(', '))}`;
       if (schema.minLength !== undefined && value.length < schema.minLength) {
-        return schema.minLength === 1
-          ? `${path}: must not be empty`
-          : `${path}: at least ${schema.minLength} characters`;
+        return schema.minLength === 1 ? `${path}: ${say.empty}` : `${path}: ${say.minLength(schema.minLength)}`;
       }
       if (schema.maxLength !== undefined && value.length > schema.maxLength) {
-        return `${path}: at most ${schema.maxLength} characters`;
+        return `${path}: ${say.maxLength(schema.maxLength)}`;
       }
-      if (schema.format === 'date' && !isRealDate(value)) return `${path}: expected a date as YYYY-MM-DD`;
+      if (schema.format === 'date' && !isRealDate(value)) return `${path}: ${say.date}`;
       return null;
     }
     case 'number':
     case 'integer': {
-      if (typeof value !== 'number' || !Number.isFinite(value)) return `${path}: expected a number`;
-      if (schema.type === 'integer' && !Number.isSafeInteger(value)) return `${path}: expected a whole number`;
-      if (schema.minimum !== undefined && value < schema.minimum) return `${path}: must be at least ${schema.minimum}`;
-      if (schema.maximum !== undefined && value > schema.maximum) return `${path}: must be at most ${schema.maximum}`;
+      if (typeof value !== 'number' || !Number.isFinite(value)) return `${path}: ${say.number}`;
+      if (schema.type === 'integer' && !Number.isSafeInteger(value)) return `${path}: ${say.integer}`;
+      if (schema.minimum !== undefined && value < schema.minimum) return `${path}: ${say.minimum(schema.minimum)}`;
+      if (schema.maximum !== undefined && value > schema.maximum) return `${path}: ${say.maximum(schema.maximum)}`;
       return null;
     }
     case 'array': {
-      if (!Array.isArray(value)) return `${path}: expected a list`;
+      if (!Array.isArray(value)) return `${path}: ${say.list}`;
       if (schema.minItems !== undefined && value.length < schema.minItems) {
-        return `${path}: at least ${schema.minItems} item(s)`;
+        return `${path}: ${say.minItems(schema.minItems)}`;
       }
       if (schema.maxItems !== undefined && value.length > schema.maxItems) {
-        return `${path}: at most ${schema.maxItems} item(s)`;
+        return `${path}: ${say.maxItems(schema.maxItems)}`;
       }
       for (let index = 0; index < value.length; index++) {
-        const problem = validate(schema.items, value[index], `${path}[${index}]`);
+        const problem = validate(schema.items, value[index], `${path}[${index}]`, locale);
         if (problem) return problem;
       }
       return null;
     }
     case 'object': {
-      if (!isRecord(value)) return `${path}: expected an object`;
+      if (!isRecord(value)) return `${path}: ${say.object}`;
       for (const name of Object.keys(value)) {
-        if (!Object.hasOwn(schema.properties, name)) return `${path}.${name}: unknown field`;
+        if (!Object.hasOwn(schema.properties, name)) return `${path}.${name}: ${say.unknown}`;
       }
       for (const name of Object.keys(schema.properties)) {
         if (value[name] === undefined) {
-          if (schema.required.includes(name)) return `${path}.${name}: required`;
+          if (schema.required.includes(name)) return `${path}.${name}: ${say.required}`;
           continue;
         }
-        const problem = validate(schema.properties[name]!, value[name], `${path}.${name}`);
+        const problem = validate(schema.properties[name]!, value[name], `${path}.${name}`, locale);
         if (problem) return problem;
       }
       return null;

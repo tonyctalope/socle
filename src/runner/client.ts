@@ -31,6 +31,8 @@ export interface Runner {
   call(request: CallRequest): Promise<CallResult>;
   /** Copies an app database next to it (one copy per day, the last `keep` are kept). */
   backup(database: string, date: string, keep: number): Promise<JobResult<{ type: 'backup' } & Job>>;
+  /** Takes an app's data and code out of service. They stay on disk for a month, in case it was a mistake. */
+  remove(app: string): Promise<JobResult<{ type: 'remove' } & Job>>;
   healthy(): Promise<boolean>;
   close(): Promise<void>;
 }
@@ -61,6 +63,7 @@ function runner(send: Send, healthy: () => Promise<boolean>, close: () => Promis
       run({ type: 'migrate', database, migrations, ...(options?.reset ? { reset: true } : {}) }),
     install: async (app, bundle) => (await run({ type: 'install', app, bundle })).hash,
     backup: (database, date, keep) => run({ type: 'backup', database, date, keep }),
+    remove: (app) => run({ type: 'remove', app }),
     async call(callRequest) {
       try {
         return await run({ type: 'call', request: callRequest });

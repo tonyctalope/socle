@@ -201,12 +201,22 @@ export interface AppDb {
   read: Connection;
 }
 
+/** The identity of a database file on disk, or null when there is none. */
+function fileIdentity(file: string): string | null {
+  try {
+    const stat = statSync(file);
+    return `${stat.dev}:${stat.ino}`;
+  } catch {
+    return null;
+  }
+}
+
 const MAX_OPEN = 24;
 
 export class AppDatabases {
   private readonly appsDir: string;
   private readonly limits: Limits;
-  private readonly open = new Map<string, AppDb>();
+  private readonly open = new Map<string, AppDb & { identity: string | null }>();
 
   constructor(appsDir: string, limits: Limits) {
     this.appsDir = appsDir;
@@ -214,14 +224,19 @@ export class AppDatabases {
   }
 
   get(database: string): AppDb {
+    const file = databaseFile(this.appsDir, database);
     const known = this.open.get(database);
     if (known) {
-      // Re-insert to keep the map ordered by last use.
-      this.open.delete(database);
-      this.open.set(database, known);
-      return known;
+      // An app that was removed, then created again under the same name, has a new file: a
+      // handle on the old one would keep serving the removed app's data.
+      if (known.identity === fileIdentity(file)) {
+        // Re-insert to keep the map ordered by last use.
+        this.open.delete(database);
+        this.open.set(database, known);
+        return known;
+      }
+      this.close(database);
     }
-    const file = databaseFile(this.appsDir, database);
     mkdirSync(path.dirname(file), { recursive: true });
     const write = connect(file, 'call', false, this.limits);
     let read: Connection;
@@ -231,7 +246,7 @@ export class AppDatabases {
       write.db.close();
       throw error;
     }
-    const entry = { write, read };
+    const entry = { write, read, identity: fileIdentity(file) };
     this.open.set(database, entry);
     if (this.open.size > MAX_OPEN) {
       const [oldest] = this.open.keys();

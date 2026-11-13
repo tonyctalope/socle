@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { existsSync, readdirSync } from 'node:fs';
+import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { all } from '../src/db/database.ts';
 import { DEFAULT_LIMITS } from '../src/runner/limits.ts';
@@ -69,6 +71,7 @@ describe('a draft, from the first file to its publication', () => {
     assert.equal(page.url, `${DRAFT}/`);
     const html = await page.response.text();
     assert.match(html, /<title>Tasks \(draft\)<\/title>/);
+    assert.match(html, /"draft":true/); // the page shows a mark: nobody takes the draft for the app
     const manifest = (await (await bob.request(`${DRAFT}/_socle/manifest.webmanifest`)).json()) as { name: string };
     assert.equal(manifest.name, 'Tasks (draft)');
     const live = await bob.navigate(`${LIVE}/`);
@@ -116,7 +119,9 @@ describe('a draft, from the first file to its publication', () => {
     assert.deepEqual(published.applied, ['001_init.sql']);
     assert.match(await (await bob.request(`${CONTROL}/`)).text(), /href="https:\/\/tasks\.apps\.test\/"/);
     const page = await bob.navigate(`${LIVE}/`);
-    assert.match(await page.response.text(), /<title>Tasks<\/title>/);
+    const liveHtml = await page.response.text();
+    assert.match(liveHtml, /<title>Tasks<\/title>/);
+    assert.match(liveHtml, /"draft":false/);
     // What was tried in the draft stayed in the draft.
     assert.deepEqual(await value(await call(LIVE, 'list')), []);
     assert.equal(await value(await call(LIVE, 'add', { label: 'real work' })), 1);
@@ -288,6 +293,73 @@ describe('publishing is an administrator’s decision', () => {
       assert.equal(refused.status, 409);
       assert.match(await refused.text(), /Nothing changed for the members\./);
       assert.equal(ctx.deps.apps.status('tasks')!.live?.versionId, status.live?.versionId);
+    } finally {
+      ctx.cleanup();
+    }
+  });
+});
+
+describe('removing an app', () => {
+  it('takes it away for everyone, keeps its data aside, and leaves nothing for an app of the same name', async () => {
+    const ctx = setup({ limits: TEST_LIMITS, env: { DEMO_APP: '1' } });
+    try {
+      const admin = new Browser(ctx.app);
+      const member = new Browser(ctx.app);
+      const { userId } = signIn(ctx, admin, BOB);
+      signIn(ctx, member, ALICE);
+      const { apps } = ctx.deps;
+      const publish = async () => {
+        apps.create('tasks', { name: 'Tasks', description: '' }, { id: userId });
+        assert.ok((await apps.saveDraft('tasks', tasks(), { id: userId })).ok);
+        assert.ok((await apps.publishDraft('tasks')).ok);
+      };
+      const call = (browser: Browser, origin: string, name: string, input: unknown = {}) =>
+        browser.fetch(`${origin}/_socle/api/fn/${name}`, { method: 'POST', json: { input } });
+      await publish();
+      await member.navigate(`${LIVE}/`);
+      await member.navigate(`${DRAFT}/`);
+      assert.equal((await call(member, LIVE, 'add', { label: 'kept aside' })).status, 200);
+
+      // Asked twice: a page, then its button. Only an administrator, only from the control plane.
+      const confirm = await admin.request(`${CONTROL}/admin/apps/tasks/remove`);
+      assert.match(await confirm.text(), /Remove Tasks\?[\s\S]*action="\/admin\/apps\/tasks\/remove"/);
+      assert.equal(ctx.deps.apps.status('tasks')?.name, 'Tasks'); // looking at the page removes nothing
+      const post = (browser: Browser, origin = CONTROL) =>
+        browser.request(`${CONTROL}/admin/apps/tasks/remove`, { method: 'POST', headers: { origin } });
+      assert.equal((await post(member)).status, 403);
+      assert.equal((await post(admin, LIVE)).status, 403);
+      const removed = await post(admin);
+      assert.equal(removed.status, 303);
+      assert.match(removed.headers.get('location')!, /removed=Tasks/);
+
+      assert.equal(apps.status('tasks'), null);
+      assert.doesNotMatch(await (await member.request(`${CONTROL}/`)).text(), /tasks\.apps\.test/);
+      assert.equal((await member.navigate(`${LIVE}/`)).response.status, 404);
+      assert.equal((await call(member, LIVE, 'list')).status, 404);
+      const left = all<{ scope: string }>(ctx.deps.db, "SELECT scope FROM sessions WHERE scope LIKE 'tasks%'");
+      assert.deepEqual(left, []);
+      assert.equal(all(ctx.deps.db, "SELECT id FROM app_versions WHERE app = 'tasks'").length, 0);
+      // The data is out of the app's reach, not destroyed.
+      const appsDir = path.join(ctx.deps.config.dataDir, 'apps');
+      assert.equal(existsSync(path.join(appsDir, 'tasks')), false);
+      const aside = readdirSync(path.join(appsDir, '.removed'));
+      assert.equal(aside.length, 1);
+      assert.match(aside[0]!, /^tasks-\d{4}-/);
+      assert.ok(existsSync(path.join(appsDir, '.removed', aside[0]!, 'live.db')));
+
+      // An app created later under the same name starts from nothing.
+      await publish();
+      await member.navigate(`${LIVE}/`);
+      const fresh = await call(member, LIVE, 'list');
+      assert.deepEqual(((await fresh.json()) as { value: unknown }).value, []);
+
+      // The demo app would come back at the next start: it is not offered for removal.
+      assert.equal((await admin.request(`${CONTROL}/admin/apps/demo/remove`)).status, 404);
+      assert.equal(
+        (await admin.request(`${CONTROL}/admin/apps/demo/remove`, { method: 'POST', headers: { origin: CONTROL } }))
+          .status,
+        404,
+      );
     } finally {
       ctx.cleanup();
     }

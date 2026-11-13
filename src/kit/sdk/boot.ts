@@ -14,6 +14,8 @@ export interface Boot {
   push: { publicKey: string };
   /** Language of the platform's own words, e.g. "en". */
   locale: string;
+  /** True when this page is the app's draft, not what is published. */
+  draft?: boolean;
 }
 
 function read(): Boot {

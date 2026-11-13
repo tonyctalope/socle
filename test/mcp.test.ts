@@ -338,4 +338,27 @@ describe('the builder: an agent creates an app over MCP', () => {
       allowed.add(ALICE);
     }
   });
+
+  it('lets a member disconnect an application from the platform itself', async () => {
+    const connected = await connect(aliceCookie);
+    const page = await (await fetch(`${origin}/connections`, { headers: { cookie: aliceCookie } })).text();
+    assert.match(page, /Test agent[\s\S]*the app builder/);
+    const grant = /action="\/connections\/([^"]+)\/revoke"/.exec(page)![1]!;
+    const revoke = (cookie: string, from = origin) =>
+      fetch(`${origin}/connections/${grant}/revoke`, {
+        method: 'POST',
+        headers: { cookie, origin: from },
+        redirect: 'manual',
+      });
+    // Not another member's to end, and not a page of an app's either.
+    assert.equal((await revoke(browserOf(BOB))).status, 404);
+    assert.equal((await revoke(aliceCookie, 'http://chores.apps.localhost')).status, 403);
+    assert.equal((await tool('list_apps', {}, connected)).isError, false);
+    assert.equal((await revoke(aliceCookie)).status, 303);
+    await assert.rejects(connected.listTools());
+    assert.match(
+      await (await fetch(`${origin}/connections`, { headers: { cookie: aliceCookie } })).text(),
+      /No application is connected\./,
+    );
+  });
 });

@@ -1,6 +1,6 @@
 import { Component, type ComponentType, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { words } from './boot.ts';
+import { boot, words } from './boot.ts';
 import { listen } from './data.ts';
 
 const TEXT = words({
@@ -8,11 +8,13 @@ const TEXT = words({
     title: 'Something went wrong',
     body: 'The app ran into an error. Reloading the page is often enough.',
     reload: 'Reload',
+    draft: 'Draft',
   },
   fr: {
     title: 'Un problème est survenu',
     body: 'L’appli a rencontré une erreur. Recharger la page suffit souvent.',
     reload: 'Recharger',
+    draft: 'Brouillon',
   },
 });
 
@@ -54,6 +56,12 @@ export function start(App: ComponentType): void {
   createRoot(root).render(
     <ErrorScreen>
       <App />
+      {boot.draft && (
+        // On the draft's address only: a mark nobody can click or mistake for part of the app.
+        <div className="pointer-events-none fixed bottom-2 left-2 z-50 rounded-full bg-warn px-2.5 py-1 text-xs font-semibold text-white opacity-90 shadow">
+          {TEXT.draft}
+        </div>
+      )}
     </ErrorScreen>,
   );
 }

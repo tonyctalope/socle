@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 // The server code of each app, kept by the runner next to the app's data and named
@@ -63,4 +63,34 @@ export class BundleStore {
     if (this.cache.size > MAX_CACHED) this.cache.delete(this.cache.keys().next().value!);
     return code;
   }
+}
+
+/** Where removed apps wait before they are deleted for good. The name can never be an app's. */
+const REMOVED = '.removed';
+const REMOVED_DAYS = 30;
+
+/**
+ * Takes an app's folder (its databases, their copies, its code) out of service by moving
+ * it aside: a deletion asked by mistake can be undone by hand for a month. Returns false
+ * when the runner had nothing for that app.
+ */
+export function removeApp(appsDir: string, app: string, now = Date.now()): boolean {
+  if (!APP.test(app)) throw new Error(`invalid app name: ${app}`);
+  const aside = path.join(appsDir, REMOVED);
+  mkdirSync(aside, { recursive: true });
+  for (const entry of readdirSync(aside)) {
+    const full = path.join(aside, entry);
+    if (now - statSync(full).mtimeMs > REMOVED_DAYS * 24 * 3600 * 1000) rmSync(full, { recursive: true, force: true });
+  }
+  const dir = path.join(appsDir, app);
+  try {
+    statSync(dir);
+  } catch {
+    return false;
+  }
+  const target = path.join(aside, `${app}-${new Date(now).toISOString().replace(/[:.]/g, '-')}`);
+  renameSync(dir, target);
+  // The folder's own date says when it was removed, whatever its files' dates are.
+  utimesSync(target, new Date(now), new Date(now));
+  return true;
 }

@@ -677,6 +677,10 @@ describe('an instance set to another language', () => {
       });
       assert.equal(refused.status, 422);
       assert.equal(((await refused.json()) as { message: string }).message, 'Écrivez quelque chose à ajouter.');
+      // So does the platform when it refuses an input the function does not accept.
+      const invalid = await bob.fetch(`${DEMO}/_socle/api/fn/add`, { method: 'POST', json: { input: { label: '' } } });
+      assert.equal(invalid.status, 400);
+      assert.equal(((await invalid.json()) as { message: string }).message, 'input.label: ne doit pas être vide');
     } finally {
       ctx.cleanup();
     }

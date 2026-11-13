@@ -13,7 +13,7 @@ main{width:100%;max-width:460px;background:var(--card);border:1px solid var(--li
 .apps img{width:44px;height:44px;border-radius:11px;flex:none}.apps strong{display:block}.apps span{color:var(--muted);font-size:.9rem;display:block}
 .actions{margin-top:20px}
 button,.button{display:block;width:100%;border:0;border-radius:12px;padding:13px 16px;font:600 1rem system-ui,sans-serif;cursor:pointer;text-align:center;text-decoration:none}
-.primary{background:var(--accent);color:var(--accent-ink)}.secondary{background:transparent;color:var(--ink);border:1px solid var(--line)}
+.primary{background:var(--accent);color:var(--accent-ink)}.danger{background:var(--danger);color:var(--card)}.secondary{background:transparent;color:var(--ink);border:1px solid var(--line)}
 a:focus-visible,button:focus-visible,.button:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
 .error{color:var(--danger);font-weight:600}.notice{border:1px solid var(--line);border-radius:12px;padding:10px 14px}
 .app{border-top:1px solid var(--line);margin-top:18px}.app h2{color:var(--ink);font-size:1.1rem}.app h2 span{font-weight:400;font-size:.9rem}

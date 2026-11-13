@@ -1,6 +1,6 @@
 import { buildApp, type BuildOutcome } from './build/build.ts';
 import { buildVendor, type VendorFiles } from './build/vendor.ts';
-import { BundleStore } from './bundles.ts';
+import { BundleStore, removeApp } from './bundles.ts';
 import type { Limits } from './limits.ts';
 import {
   AppDatabases,
@@ -26,7 +26,9 @@ export type Job =
   | { type: 'migrate'; database: string; migrations: Migration[]; reset?: boolean }
   | { type: 'vendor' }
   /** Copies an app database next to it, once per day. */
-  | { type: 'backup'; database: string; date: string; keep: number };
+  | { type: 'backup'; database: string; date: string; keep: number }
+  /** Takes everything the runner keeps for an app (data, code, copies) out of service. */
+  | { type: 'remove'; app: string };
 
 export type MigrateResult =
   ({ ok: true } & MigrationOutcome) | { ok: false; migration: string | null; message: string };
@@ -38,6 +40,7 @@ export interface JobResults {
   migrate: MigrateResult;
   vendor: VendorFiles;
   backup: { ok: true; written: boolean } | { ok: false; message: string };
+  remove: { ok: true; removed: boolean } | { ok: false; message: string };
 }
 
 export type JobResult<J extends Job = Job> = JobResults[J['type']];
@@ -49,7 +52,13 @@ export type JobResult<J extends Job = Job> = JobResults[J['type']];
  * source did to it can outlive the job.
  */
 export function isOneShot(job: Job): boolean {
-  return job.type === 'build' || job.type === 'vendor' || job.type === 'migrate' || job.type === 'backup';
+  return (
+    job.type === 'build' ||
+    job.type === 'vendor' ||
+    job.type === 'migrate' ||
+    job.type === 'backup' ||
+    job.type === 'remove'
+  );
 }
 
 /** How long a job may run before the process doing it is killed. */
@@ -99,6 +108,12 @@ export function createExecutor(appsDir: string, limits: Limits): Executor {
         return buildApp(job.files, limits);
       case 'vendor':
         return buildVendor();
+      case 'remove':
+        try {
+          return { ok: true, removed: removeApp(appsDir, job.app) };
+        } catch (error) {
+          return { ok: false, message: (error as Error).message };
+        }
       case 'backup':
         try {
           return { ok: true, written: backupDatabase(appsDir, job.database, job.date, job.keep) !== null };
