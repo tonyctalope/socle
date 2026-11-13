@@ -21,6 +21,10 @@ export interface Config {
   /** Local development only: /auth/dev-login signs in any allowlisted e-mail. */
   devLogin: boolean;
   secureCookies: boolean;
+  /** Unix socket of the runner (a separate container). Null: the runner's workers are started by this process. */
+  runnerSocket: string | null;
+  /** Where the household lives: "today" for an app's server functions. */
+  timezone: string;
 }
 
 export class ConfigError extends Error {}
@@ -101,6 +105,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new ConfigError('VAPID_SUBJECT must be an https:// URL or a mailto: address');
   }
 
+  // In production the code that builds and runs what agents wrote lives in its own
+  // container, without network or secrets. Starting it here is for development only.
+  const runnerSocket = env.RUNNER_SOCKET ? path.resolve(env.RUNNER_SOCKET) : null;
+  if (!runnerSocket && env.NODE_ENV === 'production') {
+    throw new ConfigError(
+      'RUNNER_SOCKET is required in production: the runner is a separate container (see compose.yaml)',
+    );
+  }
+  const timezone = env.APP_TIMEZONE || 'Europe/Paris';
+  try {
+    new Intl.DateTimeFormat('en-CA', { timeZone: timezone });
+  } catch {
+    throw new ConfigError(`APP_TIMEZONE is not a known timezone: ${timezone}`);
+  }
+
   return {
     controlOrigin: url.origin,
     controlHost: url.host,
@@ -116,6 +135,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     demoApp: flag(env.DEMO_APP),
     devLogin,
     secureCookies: secure,
+    runnerSocket,
+    timezone,
   };
 }
 
@@ -130,4 +151,14 @@ export function appSlugFromHost(config: Config, host: string): string | null {
   if (!host.endsWith(suffix)) return null;
   const slug = host.slice(0, -suffix.length);
   return isValidSlug(slug) ? slug : null;
+}
+
+/** The calendar date (YYYY-MM-DD) where the household lives. */
+export function localDate(config: Config, date: Date): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: config.timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
 }

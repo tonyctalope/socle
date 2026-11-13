@@ -42,9 +42,10 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
   app.use('*', securityHeaders(config, CONTROL_CSP));
   app.use('*', bodyLimit({ maxSize: 64 * 1024, onError: (c) => c.text('Requête trop volumineuse', 413) }));
 
-  app.get('/healthz', (c) => {
+  app.get('/healthz', async (c) => {
     get(db, 'SELECT 1 AS ok');
-    return c.json({ ok: true });
+    // The runner being away does not make this process unhealthy: restarting it would not help.
+    return c.json({ ok: true, runner: await deps.runner.healthy() });
   });
 
   app.get('/icons/:file', (c) => {

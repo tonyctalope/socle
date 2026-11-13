@@ -1,0 +1,16 @@
+/* The platform's design tokens, as Tailwind theme variables: bg-card, text-muted,
+   border-line, bg-accent… They point at the --socle-* values of base.css, which
+   switch with the phone's light or dark mode, so an app styled with them follows. */
+@theme {
+  --color-bg: var(--socle-bg);
+  --color-card: var(--socle-card);
+  --color-ink: var(--socle-ink);
+  --color-muted: var(--socle-muted);
+  --color-line: var(--socle-line);
+  --color-accent: var(--socle-accent);
+  --color-accent-ink: var(--socle-accent-ink);
+  --color-ok: var(--socle-ok);
+  --color-warn: var(--socle-warn);
+  --color-danger: var(--socle-danger);
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}

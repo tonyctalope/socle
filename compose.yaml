@@ -8,6 +8,9 @@ services:
     env_file: .env
     environment:
       DATA_DIR: /data
+      RUNNER_SOCKET: /data/run/runner.sock
+    depends_on:
+      - runner
     # The bind-mounted ./data must be writable by this uid:gid.
     user: '${SOCLE_UID:-1000}:${SOCLE_GID:-1000}'
     volumes:
@@ -45,6 +48,50 @@ services:
       - traefik.http.routers.socle-apps.tls.certresolver=${SOCLE_CERT_RESOLVER:-letsencrypt}
       - traefik.http.routers.socle-apps.tls.domains[0].main=*.${APPS_DOMAIN}
       - traefik.http.routers.socle-apps.service=socle
+
+  # Builds the apps and runs their server functions: everything that touches what an
+  # agent wrote. Same image, but no network, no secret (no env_file) and no view of the
+  # platform database: only the apps' own data and the socket the web container talks to.
+  runner:
+    image: ghcr.io/tonyctalope/socle:latest
+    container_name: socle-runner
+    restart: unless-stopped
+    command: ['node', 'src/runner/main.ts']
+    environment:
+      RUNNER_SOCKET: /run/socle/runner.sock
+      APPS_DIR: /apps
+    user: '${SOCLE_UID:-1000}:${SOCLE_GID:-1000}'
+    network_mode: none
+    volumes:
+      # Both folders must exist and belong to that uid:gid before the first start (see README).
+      - ./data/apps:/apps
+      - ./data/run:/run/socle
+    read_only: true
+    # Three call workers, plus one process at a time for a build, a migration or a backup; the
+    # runner kills any of them that grows past 384 MiB.
+    mem_limit: 2g
+    pids_limit: 256
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('node:http').get({socketPath:process.env.RUNNER_SOCKET,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
 
 networks:
   frontend:
