@@ -17,8 +17,10 @@ export const DEFAULT_GATE: GateOptions = { perApp: 2, waitingPerApp: 16, maxWait
 interface Lane {
   running: number;
   waiting: (() => void)[];
-  /** Calls of the capped kind (the draft's) that are running or waiting. */
+  /** Calls of the capped kind (the draft's) that hold or wait for one of the app's places. */
   capped: number;
+  /** Calls of the capped kind waiting for another of their kind to finish. */
+  cappedWaiting: (() => void)[];
 }
 
 export class CallGate {
@@ -36,7 +38,8 @@ export class CallGate {
    *
    * An app's two addresses share its places. `most` caps how many of them one kind of call
    * (the draft's) may hold or wait for at once, so that trying a draft never takes every
-   * place of the published app.
+   * place of the published app. Beyond it, calls of that kind wait for one another (a screen
+   * commonly asks for several things at once) in a queue of their own.
    */
   async run<T>(
     app: string,
@@ -46,16 +49,38 @@ export class CallGate {
   ): Promise<T | 'busy' | 'gone'> {
     let lane = this.lanes.get(app);
     if (!lane) {
-      lane = { running: 0, waiting: [], capped: 0 };
+      lane = { running: 0, waiting: [], capped: 0, cappedWaiting: [] };
       this.lanes.set(app, lane);
     }
     if (most === undefined) return this.take(app, lane, signal, task);
-    if (lane.capped >= most) return 'busy';
-    lane.capped += 1;
+    if (lane.capped >= most) {
+      if (lane.cappedWaiting.length >= this.options.waitingPerApp) return 'busy';
+      const waited = await this.wait(lane.cappedWaiting, signal);
+      if (waited !== 'go') {
+        this.forget(app, lane);
+        return waited;
+      }
+      // The call of this kind that just finished handed its place over: `capped` already counts this one.
+    } else {
+      lane.capped += 1;
+    }
     try {
       return await this.take(app, lane, signal, task);
     } finally {
-      lane.capped -= 1;
+      const next = lane.cappedWaiting.shift();
+      if (next) {
+        next();
+      } else {
+        lane.capped -= 1;
+        this.forget(app, lane);
+      }
+    }
+  }
+
+  /** Drops an app's lane once nothing of it runs or waits. */
+  private forget(app: string, lane: Lane): void {
+    if (lane.running === 0 && lane.capped === 0 && lane.cappedWaiting.length === 0 && this.lanes.get(app) === lane) {
+      this.lanes.delete(app);
     }
   }
 
@@ -67,7 +92,7 @@ export class CallGate {
   ): Promise<T | 'busy' | 'gone'> {
     if (lane.running >= this.options.perApp) {
       if (lane.waiting.length >= this.options.waitingPerApp) return 'busy';
-      const waited = await this.wait(lane, signal);
+      const waited = await this.wait(lane.waiting, signal);
       if (waited !== 'go') return waited;
       // The call that just finished handed its place over: `running` already counts this one.
     } else {
@@ -81,18 +106,18 @@ export class CallGate {
         next();
       } else {
         lane.running -= 1;
-        if (lane.running === 0 && this.lanes.get(app) === lane) this.lanes.delete(app);
+        this.forget(app, lane);
       }
     }
   }
 
-  private wait(lane: Lane, signal: AbortSignal | undefined): Promise<'go' | 'busy' | 'gone'> {
+  private wait(queue: (() => void)[], signal: AbortSignal | undefined): Promise<'go' | 'busy' | 'gone'> {
     return new Promise((resolve) => {
       if (signal?.aborted) return resolve('gone');
       const leave = (outcome: 'busy' | 'gone') => {
-        const index = lane.waiting.indexOf(go);
+        const index = queue.indexOf(go);
         if (index < 0) return; // already had its turn
-        lane.waiting.splice(index, 1);
+        queue.splice(index, 1);
         clearTimeout(timer);
         signal?.removeEventListener('abort', onAbort);
         resolve(outcome);
@@ -105,7 +130,7 @@ export class CallGate {
         resolve('go');
       };
       signal?.addEventListener('abort', onAbort, { once: true });
-      lane.waiting.push(go);
+      queue.push(go);
     });
   }
 }

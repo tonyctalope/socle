@@ -182,7 +182,8 @@ the parent domain. Everything below exists because of that; none of it is option
 - A draft is another origin with its own database: a draft's code never sees published data, and a session of
   one address is not a session of the other. Each address serves its own build files only
   (`byAssetHash` takes the address). The two share the app's places in the call gate (keyed by slug), the
-  draft holding one at most.
+  draft holding one at most: its other calls wait for one another in a queue of their own (a screen asks
+  for several things at once), never in the published app's.
 - Push endpoints are restricted to the browsers' push services (`parseSubscription`) and capped per member and app
   (`MAX_SUBSCRIPTIONS`), so a subscription can neither make the server call arbitrary URLs nor fan out without
   bound.

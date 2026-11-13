@@ -1,6 +1,6 @@
 {
   "name": "socle",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "private": true,
   "type": "module",
   "description": "One self-hosted platform for the small apps of a household or a team: sign-in, sessions, notifications, PWA, build and database provided once; apps are just source files, written by people or by agents.",
