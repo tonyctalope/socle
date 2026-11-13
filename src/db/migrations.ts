@@ -134,4 +134,10 @@ export const MIGRATIONS: readonly string[] = [
   /* 6 — an app published before drafts existed serves its published version as its draft */ `
   UPDATE apps SET draft_version = live_version WHERE draft_version IS NULL;
   `,
+  /* 7 — who can open an app: every member (NULL), or the listed e-mail addresses (JSON array) */ `
+  ALTER TABLE apps ADD COLUMN access TEXT;
+  `,
+  /* 8 — an app's own icon, rendered by the build in the sizes phones ask for (JSON: file name → base64 PNG) */ `
+  ALTER TABLE app_versions ADD COLUMN icons TEXT;
+  `,
 ];

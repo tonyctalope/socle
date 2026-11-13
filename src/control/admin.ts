@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { html } from 'hono/html';
-import { DEMO_SLUG, listApps } from '../apps/registry.ts';
+import { accessList, DEMO_SLUG, getApp, listApps } from '../apps/registry.ts';
 import type { DeployOutcome } from '../apps/store.ts';
 import { siteOf } from '../apps/slug.ts';
 import { appOrigin } from '../config.ts';
@@ -118,14 +118,83 @@ export function adminRoutes(deps: Deps): Hono<ControlEnv> {
                       }`
                   : ''
               }
-              ${
-                removable(row.slug)
-                  ? html`<p class="muted"><a href="/admin/apps/${row.slug}/remove">${t('Remove this app…')}</a></p>`
-                  : ''
-              }
+              <p class="muted"><a href="/admin/apps/${row.slug}/">${t('Versions, access, removal…')}</a></p>
             </section>`;
           })}
           <p class="actions"><a class="button secondary" href="/">${t('Home')}</a></p>`,
+      ),
+    );
+  });
+
+  const when = new Intl.DateTimeFormat(config.locale, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    timeZone: config.timezone,
+  });
+
+  // One app: the versions members had, who can open it, and its removal.
+  app.get('/admin/apps/:slug/', (c) => {
+    const row = getApp(db, c.req.param('slug'));
+    if (!row) return c.text('Not found', 404);
+    const versions = deps.apps.versions(row.slug);
+    const limited = accessList(row);
+    const saved = c.req.query('saved') !== undefined;
+    return c.html(
+      page(
+        config.locale,
+        row.name,
+        html`<h1>${row.name} <span class="muted">${row.slug}</span></h1>
+          ${saved ? html`<p class="notice">${t('Saved.')}</p>` : ''}
+          <h2>${t('Published versions')}</h2>
+          ${versions.length === 0 ? html`<p class="muted">${t('Never published')}</p>` : ''}
+          <ul class="plain">
+            ${versions.map(
+              (version) =>
+                html`<li>
+                  ${when.format(new Date(version.publishedAt))}
+                  ${
+                    version.live
+                      ? html`<strong>· ${t('published now')}</strong>`
+                      : version.canReturn
+                        ? html`<form class="inline" method="post" action="/admin/apps/${row.slug}/return">
+                            <input type="hidden" name="version" value="${version.id}" />
+                            <button class="link" type="submit">${t('Come back to this version')}</button>
+                          </form>`
+                        : html`<span class="muted">· ${t('the data changed shape since')}</span>`
+                  }
+                </li>`,
+            )}
+          </ul>
+          <p class="muted">
+            ${t(
+              'Coming back to a version brings back its screens and functions; what people put in the app stays as it is.',
+            )}
+          </p>
+          <h2>${t('Who can open it')}</h2>
+          <form method="post" action="/admin/apps/${row.slug}/access">
+            <label class="choice">
+              <input type="radio" name="who" value="everyone" ${limited === null ? 'checked' : ''} />
+              ${t('Every member')}
+            </label>
+            <label class="choice">
+              <input type="radio" name="who" value="some" ${limited === null ? '' : 'checked'} />
+              ${t('Only these members:')}
+            </label>
+            ${[...config.allowedEmails].sort().map(
+              (email) =>
+                html`<label class="choice indent">
+                  <input type="checkbox" name="email" value="${email}" ${limited?.includes(email) ? 'checked' : ''} />
+                  ${email}
+                </label>`,
+            )}
+            <p class="actions"><button class="secondary" type="submit">${t('Save')}</button></p>
+          </form>
+          ${
+            removable(row.slug)
+              ? html`<p class="muted"><a href="/admin/apps/${row.slug}/remove">${t('Remove this app…')}</a></p>`
+              : ''
+          }
+          <p class="actions"><a class="button secondary" href="/admin/">${t('Administration')}</a></p>`,
       ),
     );
   });
@@ -158,7 +227,9 @@ export function adminRoutes(deps: Deps): Hono<ControlEnv> {
     const slug = c.req.param('slug');
     const action = c.req.param('action');
     const status = deps.apps.status(slug);
-    if (!status || !['publish', 'discard', 'remove'].includes(action)) return c.text('Not found', 404);
+    if (!status || !['publish', 'discard', 'remove', 'return', 'access'].includes(action)) {
+      return c.text('Not found', 404);
+    }
     const back = { href: '/admin/', label: t('Administration') };
     if (action === 'remove') {
       if (!removable(slug)) return c.text('Not found', 404);
@@ -190,9 +261,28 @@ export function adminRoutes(deps: Deps): Hono<ControlEnv> {
       if (!discarding.ok) return refusal(t('Not discarded'), discarding);
       return c.redirect(`/admin/?discarded=${slug}`, 303);
     }
+    const form = await c.req.parseBody({ all: true }).catch(() => ({}) as Record<string, unknown>);
+    if (action === 'access') {
+      // Only addresses of the allowlist can be listed: the form cannot name anyone else.
+      const chosen = [form.email].flat().filter((email): email is string => typeof email === 'string');
+      const emails =
+        form.who === 'some' ? chosen.filter((email) => config.allowedEmails.has(email.toLowerCase())) : null;
+      deps.apps.setAccess(slug, emails);
+      console.info(
+        `[${slug}] access set by ${c.get('session')!.user.email}: ${emails ? `${emails.length} member(s)` : 'every member'}`,
+      );
+      return c.redirect(`/admin/apps/${slug}/?saved`, 303);
+    }
+    if (action === 'return') {
+      const target = Number(form.version);
+      if (!Number.isInteger(target) || target <= 0) return c.text('Invalid request', 400);
+      const returning = await deps.apps.returnTo(slug, target);
+      if (!returning.ok) return refusal(t('Not changed'), returning);
+      console.info(`[${slug}] back to version ${target}, by ${c.get('session')!.user.email}`);
+      return c.redirect(`/admin/apps/${slug}/?saved`, 303);
+    }
     // The form names the draft version its page showed: a draft built again since is not
     // published in its place.
-    const form = await c.req.parseBody().catch(() => ({}) as Record<string, unknown>);
     const shown = Number(form.version);
     if (!Number.isInteger(shown) || shown <= 0) return c.text('Invalid request', 400);
     const outcome = await deps.apps.publishDraft(slug, shown);

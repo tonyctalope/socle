@@ -16,7 +16,7 @@ Two processes, one image:
   container with no network and no secret, reached over a Unix socket.
 
 The goal that shapes every decision: **one dependency tree to keep patched**. Apps never bring npm packages of
-their own, server or browser side. Keep the platform's own tree small (12 production dependencies today).
+their own, server or browser side. Keep the platform's own tree small (13 production dependencies today).
 
 ## Commands
 
@@ -80,6 +80,9 @@ the sandbox load: `src/kit`, `src/demo`).
 - `src/control/admin.ts` — `/admin/`: an administrator (`ADMIN_EMAILS`) publishes or discards drafts, and removes
   apps (the runner moves the app's folder to `<APPS_DIR>/.removed/` for a month; database handles notice a
   replaced file, so an app created again under the same name starts empty).
+- `/admin/apps/<slug>/` — versions (`returnTo`: an earlier version comes back only when its migrations are
+  exactly the published ones, since migrations never go backwards) and the access list (`apps.access`, read by
+  `canAccess` alone).
 - `src/control/connections.ts` — `/connections`: a member's connected applications (OAuth grants), and "Disconnect".
 - `src/demo/` — the demo app, as the folder of sources an agent would send (`app.json`, `web/main.tsx`,
   `server/index.ts`, `migrations/*.sql`). It goes through the same build and sandbox as any app.
@@ -91,7 +94,8 @@ the sandbox load: `src/kit`, `src/demo`).
 
 A map of path → text (`src/runner/build/files.ts` checks its shape):
 
-- `app.json` — name, description, colors.
+- `app.json` — name, description, colors. `icon.svg` — optional, the app's icon: the build renders it (resvg,
+  WebAssembly, no fonts, nothing fetched) into the PNG sizes phones ask for, kept with the version.
 - `web/main.tsx` — default-exports the root React component; the platform mounts it and writes the HTML document.
   May import `react`, `react-dom`, `@socle/sdk`, `@socle/ui`, and its own files in `web/` and `shared/`. Styling is
   Tailwind classes (+ optional `web/style.css`).
@@ -251,7 +255,6 @@ the smoke test starts the containers by hand instead of from `compose.yaml`.
    live updates), the SDK and UI kit, the demo app on that pipeline.
 3. **Done here**: drafts with their own address and database, the builder MCP server and its OAuth server, the
    administration page where a person publishes.
-4. Done: one MCP server per app (functions marked `tool`), removing an app, connected applications.
-   Next: versions and rollback in the administration page; per-app icons and access lists; the smoke test
-   started from `compose.yaml`.
+4. Done: one MCP server per app (functions marked `tool`), removing an app, connected applications, versions
+   and return to an earlier one, access lists, per-app icons. Next: the smoke test started from `compose.yaml`.
 5. Scheduled functions (`user` is null for those), then files and photos.

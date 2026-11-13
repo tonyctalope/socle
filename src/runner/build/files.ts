@@ -39,13 +39,13 @@ export function extension(file: string): string {
 }
 
 function pathProblem(file: string): string | null {
-  if (file === 'app.json') return null;
+  if (file === 'app.json' || file === 'icon.svg') return null;
   if (file.length > SOURCE_LIMITS.maxPathLength) return 'path too long';
   const segments = file.split('/');
   const folder = segments[0] ?? '';
   const allowed = Object.hasOwn(EXTENSIONS, folder) ? EXTENSIONS[folder] : undefined;
   if (!allowed || segments.length < 2)
-    return `files go in ${FOLDERS.map((name) => `${name}/`).join(', ')} or are app.json`;
+    return `files go in ${FOLDERS.map((name) => `${name}/`).join(', ')} or are app.json or icon.svg`;
   if (!segments.every((segment) => SEGMENT.test(segment))) {
     return 'path segments may only use letters, digits, "_", "-" and ".", and cannot start with "." or "-"';
   }

@@ -4,6 +4,7 @@ import { describeBundle, type FunctionInfo } from '../sandbox/call.ts';
 import { GuestFailure } from '../sandbox/engine.ts';
 import { buildAppCss } from './css.ts';
 import { BuildFailure, checkFiles, type BuildProblem, type SourceFiles } from './files.ts';
+import { buildIcons, ICON_FILE, type AppIcons } from './icons.ts';
 import { bundleServer, SERVER_ENTRY } from './server.ts';
 import { bundleWeb } from './web.ts';
 
@@ -22,12 +23,16 @@ export interface BuiltApp {
   /** Null when the app has no server code. */
   server: { bundle: string; functions: FunctionInfo[] } | null;
   migrations: Migration[];
+  /** The app's own icon in the sizes phones ask for (base64 PNG). Null: the platform's icon. */
+  icons: AppIcons | null;
   warnings: BuildProblem[];
 }
 
 export type BuildOutcome = { ok: true; app: BuiltApp } | { ok: false; problems: BuildProblem[] };
 
 const MANIFEST = 'app.json';
+/** Behind an icon that names no color: the platform's own background. */
+const PLATFORM_BACKGROUND = '#f4f1ea';
 const COLOR = /^#[0-9a-fA-F]{6}$/;
 
 function readManifest(files: SourceFiles): AppManifest {
@@ -91,7 +96,14 @@ export async function buildApp(files: unknown, limits: Limits): Promise<BuildOut
   try {
     const manifest = readManifest(sources);
     const migrations = readMigrations(sources);
-    const [web, css, server] = await Promise.all([bundleWeb(sources), buildAppCss(sources), bundleServer(sources)]);
+    const [web, css, server, icons] = await Promise.all([
+      bundleWeb(sources),
+      buildAppCss(sources),
+      bundleServer(sources),
+      Object.hasOwn(sources, ICON_FILE)
+        ? buildIcons(sources[ICON_FILE]!, manifest.backgroundColor ?? manifest.themeColor ?? PLATFORM_BACKGROUND)
+        : null,
+    ]);
     let functions: FunctionInfo[] = [];
     if (server) {
       try {
@@ -113,6 +125,7 @@ export async function buildApp(files: unknown, limits: Limits): Promise<BuildOut
         web: { js: web.code, css },
         server: server ? { bundle: server.code, functions } : null,
         migrations,
+        icons,
         warnings: [...web.warnings, ...(server?.warnings ?? [])],
       },
     };

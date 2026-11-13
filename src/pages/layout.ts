@@ -17,6 +17,8 @@ button,.button{display:block;width:100%;border:0;border-radius:12px;padding:13px
 a:focus-visible,button:focus-visible,.button:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
 .error{color:var(--danger);font-weight:600}.notice{border:1px solid var(--line);border-radius:12px;padding:10px 14px}
 .app{border-top:1px solid var(--line);margin-top:18px}.app h2{color:var(--ink);font-size:1.1rem}.app h2 span{font-weight:400;font-size:.9rem}
+.plain{list-style:none;padding:0}.inline{display:inline}.link{display:inline;width:auto;padding:0;background:none;color:var(--accent);font:inherit;text-decoration:underline}
+.choice{display:block;margin:.35em 0}.indent{margin-left:1.6em;font-size:.93rem}
 details{margin:.6em 0}summary{cursor:pointer;color:var(--muted)}.actions+.actions{margin-top:10px}button:disabled{opacity:.5;cursor:default}a{color:var(--accent)}ul{padding-left:1.2em}li{margin:.25em 0}
 </style>`);
 

@@ -10,6 +10,9 @@ The platform provides sign-in, the HTML page, the database, notifications and th
 
 - \`app.json\` (required): \`{ "name": "…", "description": "…", "themeColor": "#rrggbb", "backgroundColor": "#rrggbb" }\`.
   The name (40 characters at most) is what people see on their Home Screen. Colors are optional.
+- \`icon.svg\` (optional): the app's icon on the Home Screen and in notifications, as one square SVG picture
+  (\`viewBox="0 0 100 100"\` for instance). Draw shapes and paths that fill the square; no text (no font is
+  available), no external or embedded bitmap image. Without it the app gets the platform's icon.
 - \`web/main.tsx\` (required): the screens. Its default export is the root React component; the platform mounts it.
   Other files go in \`web/\` (\`.tsx\`, \`.ts\`, \`.css\`, \`.svg\`…). Optional \`web/style.css\` for Tailwind \`@theme\` additions.
 - \`server/index.ts\`: the server functions (see below). Other files go in \`server/\`.
