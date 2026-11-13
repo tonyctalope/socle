@@ -30,6 +30,9 @@ import { messagePage } from '../pages/layout.ts';
 import { countSubscriptions, deleteSubscription, parseSubscription, saveSubscription } from '../push/push.ts';
 import type { CallResult } from '../runner/sandbox/call.ts';
 import { allowlist, type AppHostEnv, type Deps } from '../types.ts';
+import { APP_MCP_PATH, appResource, buildAppServer, toolsOf } from '../mcp/app.ts';
+import { mcpCors, mcpEndpoint } from '../mcp/http.ts';
+import { protectedResourceMetadata } from '../oauth/metadata.ts';
 import { functionCaller } from './calls.ts';
 import { appManifest } from './manifest.ts';
 import { translator } from '../i18n.ts';
@@ -201,6 +204,37 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
       message(c.get('app').name, t('You are signed out.'), { href: '/_socle/login?next=%2F', label: t('Sign in') }),
     );
   });
+
+  // The app's own MCP endpoint (src/mcp/app.ts): the functions it offers as tools, for the agent
+  // of a member. Bearer tokens of the platform's authorization server only, never the session
+  // cookie; only the published address has one, and only while the app offers a tool.
+  const endpoints = new Map<string, ReturnType<typeof mcpEndpoint>>();
+  const endpointOf = (slug: string) => {
+    let endpoint = endpoints.get(slug);
+    if (!endpoint) {
+      endpoint = mcpEndpoint(
+        deps,
+        appResource(config, slug),
+        (caller) => buildAppServer(deps, getApp(db, slug)!, deps.apps.live(slug), caller, callFunction),
+        (caller) => {
+          const row = getApp(db, slug);
+          return row !== undefined && canAccess(caller, row);
+        },
+      );
+      endpoints.set(slug, endpoint);
+    }
+    return endpoint;
+  };
+  const offersTools = (c: Context<AppHostEnv>) =>
+    !c.get('site').draft && toolsOf(deps.apps.live(c.get('app').slug)).length > 0;
+  app.use(APP_MCP_PATH, mcpCors);
+  app.all(APP_MCP_PATH, async (c) => (offersTools(c) ? endpointOf(c.get('app').slug)(c) : c.text('Not found', 404)));
+  app.use('/.well-known/oauth-protected-resource/*', mcpCors);
+  app.get(`/.well-known/oauth-protected-resource${APP_MCP_PATH}`, (c) =>
+    offersTools(c)
+      ? c.json(protectedResourceMetadata(config, appResource(config, c.get('app').slug), c.get('app').name))
+      : c.text('Not found', 404),
+  );
 
   // From here on, a session of this host is required.
   app.use('*', async (c, next) => {

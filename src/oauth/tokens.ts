@@ -538,6 +538,18 @@ export function revokeGrant(db: Db, grantId: string, userId: number): boolean {
   return true;
 }
 
+/** Ends every connection to one endpoint: for an endpoint that no longer exists. */
+export function revokeResource(db: Db, resource: string): void {
+  transaction(db, () => {
+    const grants = all<{ id: string }>(
+      db,
+      'SELECT id FROM oauth_grants WHERE resource = :resource AND revoked_at IS NULL',
+      { resource },
+    );
+    for (const grant of grants) revokeGrantInternal(db, grant.id);
+  });
+}
+
 export function purgeOAuth(db: Db): void {
   const now = isoNow();
   const old = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();

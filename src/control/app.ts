@@ -27,6 +27,7 @@ import { CONTROL_CSP, onError, securityHeaders } from '../lib/security.ts';
 import { loadStaticFiles } from '../lib/static.ts';
 import { messagePage, page } from '../pages/layout.ts';
 import { allowlist, isAdmin, type ControlEnv, type Deps } from '../types.ts';
+import { appOfResource } from '../mcp/app.ts';
 import { buildBuilderServer } from '../mcp/builder.ts';
 import { builderResource, mcpCors, mcpEndpoint } from '../mcp/http.ts';
 import { protectedResourceMetadata } from '../oauth/metadata.ts';
@@ -261,12 +262,21 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
   }
 
   app.route('/', adminRoutes(deps));
-  // Which MCP endpoints exist, and who may get a token for each: only the builder for now.
-  const resourceCard = (resource: string) => (resource === builder ? builderCard() : null);
+  // Which MCP endpoints exist, and who may get a token for each: the builder, and the endpoint
+  // of every published app that offers tools, for the members who can open that app.
+  const resourceCard = (resource: string, user: UserRow) => {
+    if (resource === builder) return builderCard();
+    const target = appOfResource(deps, resource, user, (slug) => getApp(db, slug));
+    if (!target) return null;
+    return {
+      name: target.name,
+      description: t('It will be able to use this app in your name: read what it holds and change it.'),
+    };
+  };
   app.route('/', oauthRoutes(deps, resourceCard));
   app.route(
     '/',
-    connectionRoutes(deps, (resource) => resourceCard(resource)?.name ?? null),
+    connectionRoutes(deps, (resource, user) => resourceCard(resource, user)?.name ?? null),
   );
 
   // Sign-on towards an app host: see src/auth/sso.ts for the whole flow.

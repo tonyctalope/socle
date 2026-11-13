@@ -103,13 +103,13 @@ describe('the builder: an agent creates an app over MCP', () => {
   };
 
   /** What the member's browser does: open the authorization URL, allow, follow the way back. */
-  async function approve(authorizationUrl: URL, cookie: string): Promise<URLSearchParams> {
+  async function approve(authorizationUrl: URL, cookie: string, shows: RegExp): Promise<URLSearchParams> {
     // In process: Node's fetch always says it is not a navigation, and the server checks.
     const start = await ctx.app.request(authorizationUrl, { headers: { cookie, ...NAVIGATION } });
     assert.equal(start.status, 302, await start.text());
     const consentUrl = new URL(start.headers.get('location')!, origin);
     const page = await (await ctx.app.request(consentUrl, { headers: { cookie, ...NAVIGATION } })).text();
-    assert.match(page, /Test agent[\s\S]*wants to use the app builder/);
+    assert.match(page, shows);
     const request = /name="request" value="([^"]+)"/.exec(page)![1]!;
     const answer = await ctx.app.request(new URL('/oauth/authorize', origin), {
       method: 'POST',
@@ -121,19 +121,34 @@ describe('the builder: an agent creates an app over MCP', () => {
     return new URL(target.replaceAll('&amp;', '&')).searchParams;
   }
 
-  async function connect(cookie: string): Promise<Client> {
+  /** The access token each connected client holds. */
+  const providers = new WeakMap<Client, TestProvider>();
+
+  /**
+   * Every request of the client goes straight to the platform, whatever host its URL names:
+   * an app's endpoint is on the app's own host, which no DNS knows here.
+   */
+  const inProcess: typeof fetch = async (input, init) => ctx.app.fetch(new Request(input, init));
+
+  async function connect(
+    cookie: string,
+    mcpUrl = new URL('/mcp', origin),
+    shows = /Test agent[\s\S]*wants to use the app builder/,
+  ): Promise<Client> {
     const provider = new TestProvider();
-    const mcpUrl = new URL('/mcp', origin);
-    const first = new StreamableHTTPClientTransport(mcpUrl, { authProvider: provider });
+    const transport = () => new StreamableHTTPClientTransport(mcpUrl, { authProvider: provider, fetch: inProcess });
+    const first = transport();
     await assert.rejects(new Client({ name: 'test', version: '1.0.0' }).connect(first), UnauthorizedError);
+    assert.equal(provider.authorizationUrl?.origin, origin); // one authorization server for every endpoint
     assert.equal(provider.authorizationUrl?.pathname, '/oauth/authorize');
-    assert.equal(provider.authorizationUrl?.searchParams.get('resource'), `${origin}/mcp`);
-    const params = await approve(provider.authorizationUrl!, cookie);
+    assert.equal(provider.authorizationUrl?.searchParams.get('resource'), mcpUrl.href);
+    const params = await approve(provider.authorizationUrl!, cookie, shows);
     assert.equal(params.get('state'), provider.lastState);
     assert.equal(params.get('iss'), origin);
     await first.finishAuth(params);
     const connected = new Client({ name: 'test', version: '1.0.0' });
-    await connected.connect(new StreamableHTTPClientTransport(mcpUrl, { authProvider: provider }));
+    await connected.connect(transport());
+    providers.set(connected, provider);
     return connected;
   }
 
@@ -360,5 +375,126 @@ describe('the builder: an agent creates an app over MCP', () => {
       await (await fetch(`${origin}/connections`, { headers: { cookie: aliceCookie } })).text(),
       /No application is connected\./,
     );
+  });
+
+  it('offers an app’s own tools at the app’s address, to the agent of a member who can open it', async () => {
+    const port = origin.slice(origin.lastIndexOf(':'));
+    const appMcp = new URL(`http://chores.apps.localhost${port}/_socle/mcp`);
+    const rpc = (url: URL | string, headers: Record<string, string> = {}) =>
+      inProcess(String(url), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+      });
+    // The published app offers no tool yet: it has no endpoint, and no token can be asked for it.
+    assert.equal((await rpc(appMcp)).status, 404);
+    const builder = await connect(aliceCookie);
+
+    // A tool takes named arguments: the build says so.
+    const server = (addInput: string) => `import { mutation, query, v } from '@socle/server';
+      export const list = query({
+        tool: 'Lists the chores of the household, oldest first.',
+        handler: ({ db }) => db.all('SELECT id, label FROM chores ORDER BY id'),
+      });
+      export const add = mutation({
+        tool: 'Adds a chore to the shared list.',
+        input: ${addInput},
+        handler: ({ db, user }, input) => {
+          const label = typeof input === 'string' ? input : input.label;
+          if (label === 'nothing') throw new Error('secret detail');
+          return { id: db.run('INSERT INTO chores (label) VALUES (?)', label).lastInsertRowid, by: user.name };
+        },
+      });
+      export const purge = mutation(({ db }) => db.run('DELETE FROM chores').changes);`;
+    const write = (addInput: string) =>
+      tool('write_files', { app: 'chores', files: [{ path: 'server/index.ts', content: server(addInput) }] }, builder);
+    const refused = (await write('v.string()')).json();
+    assert.equal(refused.built, false);
+    assert.match(JSON.stringify(refused.problems), /offered as a tool takes v\.object/);
+    const built = (await write("v.object({ label: v.string().min(1).describe('What has to be done') })")).json();
+    assert.equal(built.built, true, JSON.stringify(built));
+    assert.deepEqual(
+      built.functions.map((info: { name: string; offered_as_tool: boolean }) => [info.name, info.offered_as_tool]),
+      [
+        ['add', true],
+        ['list', true],
+        ['purge', false],
+      ],
+    );
+    // Still a draft: nothing is offered until an administrator publishes.
+    assert.equal((await rpc(appMcp)).status, 404);
+    const published = await fetch(`${origin}/admin/apps/chores/publish`, {
+      method: 'POST',
+      headers: { cookie: browserOf(BOB), origin },
+      redirect: 'manual',
+    });
+    assert.equal(published.status, 303);
+    const listed = (await tool('list_apps', {}, builder)).json();
+    assert.equal(listed.apps.find((app: { app: string }) => app.app === 'chores').published.mcp_url, appMcp.href);
+
+    // The endpoint says where to sign in: the control plane, for this app and no other.
+    const challenge = await rpc(appMcp);
+    assert.equal(challenge.status, 401);
+    assert.match(
+      challenge.headers.get('www-authenticate') ?? '',
+      /chores\.apps\.localhost[^"]*\/\.well-known\/oauth-protected-resource\/_socle\/mcp"/,
+    );
+    const metadata = (await (
+      await inProcess(`http://chores.apps.localhost${port}/.well-known/oauth-protected-resource/_socle/mcp`)
+    ).json()) as { resource: string; authorization_servers: string[] };
+    assert.deepEqual(metadata, { ...metadata, resource: appMcp.href, authorization_servers: [origin] });
+    // The draft's address has no endpoint, and an app without tools none either.
+    assert.equal((await rpc(`http://chores--draft.apps.localhost${port}/_socle/mcp`)).status, 404);
+    assert.equal((await rpc(`http://demo.apps.localhost${port}/_socle/mcp`)).status, 404);
+
+    const agent = await connect(aliceCookie, appMcp, /Test agent[\s\S]*wants to use Chores/);
+    const { tools } = await agent.listTools();
+    assert.deepEqual(
+      tools.map((entry) => [entry.name, entry.description, entry.annotations?.readOnlyHint]),
+      [
+        ['add', 'Adds a chore to the shared list.', false],
+        ['list', 'Lists the chores of the household, oldest first.', true],
+      ],
+    );
+    assert.match(JSON.stringify(tools[0]!.inputSchema), /What has to be done/);
+    assert.match(agent.getInstructions() ?? '', /Chores[\s\S]*You act as alice/);
+
+    // It runs the published version on the published data, as the member.
+    const added = await tool('add', { label: 'Water the plants' }, agent);
+    assert.deepEqual(added.json(), { id: 1, by: 'alice' });
+    assert.deepEqual((await tool('list', {}, agent)).json(), [{ id: 1, label: 'Water the plants' }]);
+    assert.equal((await tool('add', { label: '' }, agent)).isError, true);
+    const failed = await tool('add', { label: 'nothing' }, agent);
+    assert.equal(failed.isError, true);
+    assert.equal(failed.text, 'The app ran into an error.'); // what went wrong stays in the app's log
+    await assert.rejects(agent.callTool({ name: 'purge', arguments: {} })); // not offered, so not callable
+
+    // A token is good at one endpoint only, each way; a session cookie at none.
+    const tokenOf = (connected: Client) => providers.get(connected)!.tokens()!.access_token;
+    const builderToken = tokenOf(builder);
+    const appToken = tokenOf(agent);
+    assert.equal((await rpc(appMcp, { authorization: `Bearer ${appToken}` })).status, 200);
+    assert.equal((await rpc(appMcp, { authorization: `Bearer ${builderToken}` })).status, 401);
+    assert.equal((await rpc(`${origin}/mcp`, { authorization: `Bearer ${appToken}` })).status, 401);
+    assert.equal((await rpc(appMcp, { cookie: aliceCookie })).status, 401);
+
+    // Both connections are the member's to end, by name.
+    const page = await (await fetch(`${origin}/connections`, { headers: { cookie: aliceCookie } })).text();
+    assert.match(page, /Chores/);
+    assert.match(page, /the app builder/);
+
+    // Removing the app ends the connections to it: an app of the same name later is another app.
+    const removed = await fetch(`${origin}/admin/apps/chores/remove`, {
+      method: 'POST',
+      headers: { cookie: browserOf(BOB), origin },
+      redirect: 'manual',
+    });
+    assert.equal(removed.status, 303);
+    assert.equal((await rpc(appMcp, { authorization: `Bearer ${appToken}` })).status, 404);
+    const grants = ctx.deps.db
+      .prepare('SELECT COUNT(*) AS n FROM oauth_grants WHERE resource = ? AND revoked_at IS NULL')
+      .get(appMcp.href) as { n: number };
+    assert.equal(grants.n, 0);
+    await builder.close();
   });
 });

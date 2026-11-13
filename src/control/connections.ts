@@ -3,6 +3,7 @@ import { html } from 'hono/html';
 import { localDate } from '../config.ts';
 import { translator } from '../i18n.ts';
 import { clientIp, isSameOrigin, RateLimiter } from '../lib/http.ts';
+import type { UserRow } from '../auth/users.ts';
 import { listGrants, revokeGrant } from '../oauth/tokens.ts';
 import { page } from '../pages/layout.ts';
 import type { ControlEnv, Deps } from '../types.ts';
@@ -12,7 +13,10 @@ import type { ControlEnv, Deps } from '../types.ts';
  * from the platform's side (the client's own "disconnect" is not the only door).
  * `describe` names a resource, or returns null for one that no longer exists.
  */
-export function connectionRoutes(deps: Deps, describe: (resource: string) => string | null): Hono<ControlEnv> {
+export function connectionRoutes(
+  deps: Deps,
+  describe: (resource: string, user: UserRow) => string | null,
+): Hono<ControlEnv> {
   const { config, db } = deps;
   const t = translator(config.locale);
   const app = new Hono<ControlEnv>();
@@ -35,7 +39,7 @@ export function connectionRoutes(deps: Deps, describe: (resource: string) => str
               html`<section class="app">
                 <h2>${grant.clientName ?? t('An application')}</h2>
                 <p class="muted">
-                  ${describe(grant.resource) ?? grant.resource} ·
+                  ${describe(grant.resource, session.user) ?? grant.resource} ·
                   ${
                     grant.lastUsedAt
                       ? t('last used on {date}', { date: localDate(config, new Date(grant.lastUsedAt)) })
