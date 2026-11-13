@@ -48,9 +48,10 @@ export const add = mutation({
 - \`query\` reads and cannot write; \`mutation\` runs in one transaction, undone entirely if it throws.
 - Every exported \`query\`/\`mutation\` of \`server/index.ts\` is callable by the screens under its export name.
 - The handler gets \`{ db, user, members, now, today, locale, notify }\` and the input.
-  \`user\` and \`members\` are \`{ id, name }\` (no e-mail address); \`now\` is epoch milliseconds; \`today\` is
+  \`user\` and \`members\` are \`{ id: number, name: string }\` (no e-mail address; store \`user.id\` in an INTEGER
+  column, and look names up in \`members\` rather than copying them); \`now\` is epoch milliseconds; \`today\` is
   YYYY-MM-DD in the instance's timezone; \`locale\` is the instance's language ("en", "fr"…).
-- \`db.all(sql, ...params)\` → rows, \`db.get(sql, ...params)\` → first row or null, \`db.run(sql, ...params)\` →
+- \`db.all<Row>(sql, ...params)\` → rows, \`db.get<Row>(sql, ...params)\` → first row or null, \`db.run(sql, ...params)\` →
   \`{ changes, lastInsertRowid }\`. Parameters are positional (\`?\`) or one object of named ones (\`:name\`). Always
   use parameters, never build SQL from input.
 - Input is checked before the handler runs: \`v.string()\`, \`v.number()\`, \`v.int()\`, \`v.boolean()\`, \`v.any()\`,
@@ -99,7 +100,7 @@ export default function App() {
   successful mutation of the app, on every open phone: screens stay in sync without any code.
 - \`api.<name>(input)\` calls any function and returns a promise of its result; it rejects with an \`ApiError\`
   (\`message\`, \`code\`, \`status\`).
-- \`useMe()\` → \`{ user, app, members }\`; \`logout()\`; \`locale\`; \`words({ en: {…}, fr: {…} })\` picks texts for the
+- \`useMe()\` → \`{ user, app: { slug, name }, members }\` (ids are numbers); \`logout()\`; \`locale\`; \`words({ en: {…}, fr: {…} })\` picks texts for the
   instance's language; \`install.standalone()\`; \`usePush()\` / \`push\` for notification settings.
 
 \`@socle/ui\` (use these first: they follow light and dark mode and feel like the other apps):
@@ -108,7 +109,8 @@ export default function App() {
 \`Field({ label, hint?, error?, children })\`, \`Input\`, \`Textarea\`, \`Select\`, \`Checkbox({ label, … })\`,
 \`List\`, \`ListItem({ end?, onClick?, children })\`, \`Badge({ tone?: 'neutral' | 'accent' | 'ok' | 'warn' | 'danger' })\`,
 \`Empty({ title, children? })\`, \`Spinner({ label? })\`, \`ErrorNote\`, \`Avatar({ name })\`,
-\`NotificationSettings()\` (a ready-made block to turn notifications on, put it in a settings screen),
+\`NotificationSettings()\` (a ready-made card, titled, to turn notifications on: place it as it is, not inside
+a \`Card\`; every app that notifies needs it somewhere),
 \`LogoutButton()\`.
 
 Styling is Tailwind CSS 4 classes. Use the platform's colors so that dark mode works: \`bg-bg\`, \`bg-card\`,

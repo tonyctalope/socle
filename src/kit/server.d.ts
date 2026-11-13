@@ -10,9 +10,9 @@ declare module '@socle/server' {
   /** The app's own database. Parameters are positional (?, ?) or one object of named ones (:name). */
   export interface Db {
     /** Every row, as objects. */
-    all(sql: string, ...params: (SqlValue | undefined)[] | [Record<string, SqlValue | undefined>]): Row[];
+    all<T = Row>(sql: string, ...params: (SqlValue | undefined)[] | [Record<string, SqlValue | undefined>]): T[];
     /** The first row, or null. */
-    get(sql: string, ...params: (SqlValue | undefined)[] | [Record<string, SqlValue | undefined>]): any;
+    get<T = any>(sql: string, ...params: (SqlValue | undefined)[] | [Record<string, SqlValue | undefined>]): T | null;
     /** INSERT, UPDATE, DELETE (mutations only). */
     run(
       sql: string,
