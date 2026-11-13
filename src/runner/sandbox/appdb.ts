@@ -347,32 +347,22 @@ const INTRUDERS = `SELECT name FROM sqlite_master
 
 /**
  * Empties a database: every table, view and trigger of the app, and the record of which
- * migrations ran. For a draft whose migrations were rewritten; the file and the handles
- * other processes hold on it stay valid.
+ * migrations ran. Called inside the migration's own transaction: if the migrations that
+ * follow fail, the database is as it was. The file and the handles other processes hold
+ * on it stay valid.
  */
-export function resetDatabase(connection: Connection): void {
-  const { db } = connection;
+function dropEverything(db: DatabaseSync): void {
   const quoted = (name: string) => `"${name.replaceAll('"', '""')}"`;
-  db.exec('PRAGMA foreign_keys = OFF');
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    const objects = db
-      .prepare(
-        "SELECT type, name FROM sqlite_master WHERE type IN ('trigger', 'view', 'table') AND name NOT LIKE 'sqlite_%'",
-      )
-      .all() as { type: string; name: string }[];
-    // Triggers and views first: they may name tables that are about to go.
-    for (const kind of ['trigger', 'view', 'table']) {
-      for (const object of objects) {
-        if (object.type === kind) db.exec(`DROP ${kind.toUpperCase()} IF EXISTS ${quoted(object.name)}`);
-      }
+  const objects = db
+    .prepare(
+      "SELECT type, name FROM sqlite_master WHERE type IN ('trigger', 'view', 'table') AND name NOT LIKE 'sqlite~_%' ESCAPE '~'",
+    )
+    .all() as { type: string; name: string }[];
+  // Triggers and views first: they may name tables that are about to go.
+  for (const kind of ['trigger', 'view', 'table']) {
+    for (const object of objects) {
+      if (object.type === kind) db.exec(`DROP ${kind.toUpperCase()} IF EXISTS ${quoted(object.name)}`);
     }
-    db.exec('COMMIT');
-  } catch (error) {
-    if (db.isTransaction) db.exec('ROLLBACK');
-    throw error;
-  } finally {
-    db.exec('PRAGMA foreign_keys = ON');
   }
 }
 
@@ -384,14 +374,20 @@ export function applyMigrations(
   connection: Connection,
   migrations: readonly Migration[],
   limits: Pick<Limits, 'maxSchemaObjects' | 'maxSchemaBytes'>,
+  /** `reset`: empty the database first, in the same transaction (a draft's database only). */
+  options: { reset?: boolean } = {},
 ): MigrationOutcome {
   const { db } = connection;
   const names = migrations.map((migration) => migration.name);
   if (names.some((name, index) => index > 0 && name <= names[index - 1]!)) {
     throw new MigrationError(names[0] ?? '', 'migrations must have distinct names, given in ascending order');
   }
+  // Dropping a table deletes its rows first: with foreign keys on, the rows that point at it
+  // would refuse. The setting cannot change inside a transaction.
+  if (options.reset) db.exec('PRAGMA foreign_keys = OFF');
   db.exec('BEGIN IMMEDIATE');
   try {
+    if (options.reset) dropEverything(db);
     db.exec(
       `CREATE TABLE IF NOT EXISTS ${PLATFORM_PREFIX}migrations (
          name TEXT PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL
@@ -470,6 +466,8 @@ export function applyMigrations(
       // the transaction is already gone
     }
     throw error;
+  } finally {
+    if (options.reset) db.exec('PRAGMA foreign_keys = ON');
   }
 }
 

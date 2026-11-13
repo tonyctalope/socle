@@ -1,12 +1,13 @@
 import { McpServer, type CallToolResult } from '@modelcontextprotocol/server';
 import * as z from 'zod';
 import { functionCaller } from '../apphost/calls.ts';
-import { getApp, listApps } from '../apps/registry.ts';
+import { DEMO_SLUG, getApp, listApps } from '../apps/registry.ts';
 import { isValidSlug, siteOf } from '../apps/slug.ts';
 import type { AppStatus, DeployOutcome } from '../apps/store.ts';
 import { starterFiles } from '../apps/template.ts';
 import { displayName, type UserRow } from '../auth/users.ts';
 import { appOrigin } from '../config.ts';
+import { SOURCE_LIMITS } from '../runner/limits.ts';
 import type { Deps } from '../types.ts';
 import { appResource, toolsOf } from './app.ts';
 import { GUIDE } from './guide.ts';
@@ -20,7 +21,10 @@ const VERSION = '1.0.0';
 /** What `read_files` returns in one answer; beyond it, the agent asks for the paths it needs. */
 const MAX_READ_BYTES = 200 * 1024;
 
-const slugShape = z.string().describe('The app, by its short name (as in list_apps), e.g. "groceries".');
+const slugShape = z.string().max(32).describe('The app, by its short name (as in list_apps), e.g. "groceries".');
+/** The same bounds the build applies to an app's files, so that nothing larger even reaches the store. */
+const pathShape = z.string().min(1).max(SOURCE_LIMITS.maxPathLength);
+const contentShape = z.string().max(SOURCE_LIMITS.maxFileBytes);
 
 const text = (value: string, isError = false): CallToolResult => ({
   content: [{ type: 'text', text: value }],
@@ -55,10 +59,34 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
     },
   });
   const unknown = (slug: string) => text(`There is no app named "${slug}". Call list_apps, or create_app.`, true);
+  const shipped = () =>
+    text(
+      'The demo app ships with the platform and is rewritten at every start: it cannot be edited. Create another app.',
+      true,
+    );
+  /** A tool never answers with what an unexpected failure says (SQL, paths): that goes to the log. */
+  const guarded =
+    <A>(name: string, handler: (args: A) => Promise<CallToolResult>) =>
+    async (args: A): Promise<CallToolResult> => {
+      try {
+        return await handler(args);
+      } catch (error) {
+        console.error(`builder tool ${name} failed:`, (error as Error).message);
+        return text('The platform could not do this right now. Try again in a moment.', true);
+      }
+    };
 
   /** What the agent is told after its files were saved: whether they build, and what happens next. */
   const afterSave = (slug: string, outcome: DeployOutcome): CallToolResult => {
     const status = deps.apps.status(slug)!;
+    if (!outcome.ok && outcome.stage === 'refused') {
+      return json({
+        saved: false,
+        built: false,
+        problems: outcome.problems,
+        next: 'Nothing was saved. Fix what is listed and call write_files again.',
+      });
+    }
     if (!outcome.ok) {
       return json({
         saved: true,
@@ -145,21 +173,22 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
         description: z.string().trim().max(200).optional().describe('One sentence saying what the app is for.'),
       }),
     },
-    async ({ app, name, description }) => {
+    guarded('create_app', async ({ app, name, description }) => {
       if (!isValidSlug(app)) {
         return text(
           `"${app}" cannot be an app's short name: 2 to 32 lowercase letters, digits or single hyphens, starting with a letter and not a reserved word.`,
           true,
         );
       }
+      if (app === DEMO_SLUG)
+        return text('"demo" is the name of the app that ships with the platform. Choose another.', true);
       const card = { name, description: description ?? '' };
       const created = deps.apps.create(app, card, caller);
       if (created === 'exists') return text(`An app named "${app}" already exists. Call read_files to see it.`, true);
-      if (created === 'full') return text('This instance already holds as many apps as it allows.', true);
-      if (created === 'invalid') return text(`"${app}" cannot be an app's short name.`, true);
+      if (created !== 'created') return text('This instance already holds as many apps as it allows.', true);
       console.info(`[${app}] created by ${caller.email}`);
       return afterSave(app, await deps.apps.saveDraft(app, starterFiles(card), caller));
-    },
+    }),
   );
 
   server.registerTool(
@@ -170,12 +199,12 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
         'Without paths: the list of the app\'s files with their sizes. With paths: their contents. Reads the draft (what write_files changes) unless source is "published".',
       inputSchema: z.object({
         app: slugShape,
-        paths: z.array(z.string()).max(100).optional().describe('Files to read, e.g. ["web/main.tsx"].'),
+        paths: z.array(pathShape).max(100).optional().describe('Files to read, e.g. ["web/main.tsx"].'),
         source: z.enum(['draft', 'published']).optional().describe('Default: draft.'),
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ app, paths, source }) => {
+    guarded('read_files', async ({ app, paths, source }) => {
       const files = deps.apps.files(app, source === 'published' ? 'live' : 'draft');
       if (!getApp(db, app)) return unknown(app);
       if (!files) return text(`"${app}" has no published version yet. Read its draft instead.`, true);
@@ -203,7 +232,7 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
         contents[path] = files[path]!;
       }
       return json({ app, source: source ?? 'draft', files: contents });
-    },
+    }),
   );
 
   server.registerTool(
@@ -215,11 +244,11 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
       inputSchema: z.object({
         app: slugShape,
         files: z
-          .array(z.object({ path: z.string(), content: z.string() }))
-          .max(300)
+          .array(z.object({ path: pathShape, content: contentShape }))
+          .max(SOURCE_LIMITS.maxFiles)
           .optional()
           .describe('Files to create or replace, each with its full content.'),
-        delete: z.array(z.string()).max(300).optional().describe('Paths to remove from the draft.'),
+        delete: z.array(pathShape).max(SOURCE_LIMITS.maxFiles).optional().describe('Paths to remove from the draft.'),
         reset_draft_data: z
           .boolean()
           .optional()
@@ -228,21 +257,22 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
           ),
       }),
     },
-    async ({ app, files, delete: removed, reset_draft_data }) => {
-      const current = deps.apps.files(app, 'draft');
-      if (!current) return unknown(app);
-      const next: Record<string, string> = { ...current };
-      const absent = (removed ?? []).filter((path) => !Object.hasOwn(next, path));
-      if (absent.length) return text(`Cannot delete what is not there: ${absent.join(', ')}.`, true);
-      for (const path of removed ?? []) delete next[path];
-      for (const file of files ?? []) next[file.path] = file.content;
+    guarded('write_files', async ({ app, files, delete: removed, reset_draft_data }) => {
+      if (!getApp(db, app)) return unknown(app);
+      if (app === DEMO_SLUG) return shipped();
       if (!files?.length && !removed?.length && !reset_draft_data) {
         return text('Nothing to do: give files to write, paths to delete, or reset_draft_data.', true);
       }
-      const outcome = await deps.apps.saveDraft(app, next, caller, { resetData: reset_draft_data === true });
-      console.info(`[${app}] draft saved by ${caller.email}: ${outcome.ok ? 'built' : `${outcome.stage} failed`}`);
+      // The draft is read and changed in the app's turn: two calls at once both land.
+      const outcome = await deps.apps.editDraft(
+        app,
+        { set: Object.fromEntries((files ?? []).map((file) => [file.path, file.content])), remove: removed ?? [] },
+        caller,
+        { resetData: reset_draft_data === true },
+      );
+      console.info(`[${app}] draft edited by ${caller.email}: ${outcome.ok ? 'built' : `${outcome.stage}`}`);
       return afterSave(app, outcome);
-    },
+    }),
   );
 
   server.registerTool(
@@ -253,11 +283,11 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
         "Runs one server function of the app's draft, as you (the connected person), on the draft's own data: to check your server code. Returns its result, or how it failed.",
       inputSchema: z.object({
         app: slugShape,
-        function: z.string().describe('Its export name in server/index.ts.'),
+        function: z.string().max(64).describe('Its export name in server/index.ts.'),
         input: z.unknown().optional().describe("The function's input, as JSON."),
       }),
     },
-    async (args) => {
+    guarded('call_function', async (args) => {
       const row = getApp(db, args.app);
       if (!row) return unknown(args.app);
       const version = deps.apps.draft(args.app);
@@ -291,7 +321,7 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
         notifications: result.effects.length,
         logs: result.logs,
       });
-    },
+    }),
   );
 
   server.registerTool(
@@ -307,10 +337,10 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
       }),
       annotations: { readOnlyHint: true },
     },
-    async ({ app, source, limit }) => {
+    guarded('read_logs', async ({ app, source, limit }) => {
       if (!getApp(db, app)) return unknown(app);
       return json({ app, lines: deps.apps.logs(app, source === 'published' ? 'live' : 'draft', limit ?? 50) });
-    },
+    }),
   );
 
   return server;

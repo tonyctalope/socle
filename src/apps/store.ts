@@ -2,9 +2,10 @@ import { createHash } from 'node:crypto';
 import type { UserRow } from '../auth/users.ts';
 import { all, get, run, transaction, type Db } from '../db/database.ts';
 import type { BuiltApp } from '../runner/build/build.ts';
-import type { BuildProblem } from '../runner/build/files.ts';
+import { checkFiles, type BuildProblem } from '../runner/build/files.ts';
 import { RunnerUnavailable, type Runner } from '../runner/client.ts';
 import type { FunctionInfo } from '../runner/sandbox/call.ts';
+import { DEMO_SLUG } from './registry.ts';
 import { isValidSlug, siteOf } from './slug.ts';
 
 // Apps as the web process keeps them: versions of source files and what the runner
@@ -26,12 +27,22 @@ export interface AppVersion {
   /** Names the app's server code in the runner. Null when the app has none. */
   bundleHash: string | null;
   functions: Map<string, FunctionInfo>;
+  /** What the version's app.json says: its name, description and colors. */
+  manifest: BuiltApp['manifest'];
 }
 
 export type DeployOutcome =
   | { ok: true; versionId: number; unchanged: boolean; applied: string[] }
   | { ok: false; stage: 'build'; problems: BuildProblem[] }
-  | { ok: false; stage: 'migrate'; problems: BuildProblem[] };
+  | { ok: false; stage: 'migrate'; problems: BuildProblem[] }
+  /** Refused before anything was built: files of the wrong shape, nothing to publish, a draft that changed… */
+  | { ok: false; stage: 'refused'; problems: BuildProblem[] };
+
+const refused = (message: string, file?: string): DeployOutcome => ({
+  ok: false,
+  stage: 'refused',
+  problems: [file === undefined ? { message } : { file, message }],
+});
 
 export type Target = 'live' | 'draft';
 
@@ -67,9 +78,10 @@ interface VersionRow {
   web_css: string;
   bundle_hash: string | null;
   functions: string;
+  manifest: string;
 }
 
-const VERSION_COLUMNS = 'v.id, v.asset_hash, v.web_js, v.web_css, v.bundle_hash, v.functions';
+const VERSION_COLUMNS = 'v.id, v.asset_hash, v.web_js, v.web_css, v.bundle_hash, v.functions, v.manifest';
 
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 
@@ -86,11 +98,11 @@ const assetHash = (web: { js: string; css: string }) => sha256(`${web.js}\0${web
 const KEPT_VERSIONS = 20;
 /** Apps an instance holds; creating one is a tool agents have. */
 const MAX_APPS = 100;
-/** Log lines kept per app, and how long one may be. */
+/** Log lines kept per app and per address (published, draft), and how long one may be. */
 const KEPT_LOGS = 300;
 const MAX_LOG_LENGTH = 2000;
 /** The colors of an app that names none (the platform's own background). */
-const DEFAULT_COLOR = '#f4f1ea';
+export const DEFAULT_COLOR = '#f4f1ea';
 
 /** Memory the cache of built versions may hold (their screens and stylesheets). */
 const CACHE_BYTES = 48 * 1024 * 1024;
@@ -108,6 +120,8 @@ export class AppStore {
   onRemove: (slug: string) => void = () => {};
   /** One build or publication at a time per app: the second waits for the first. */
   private readonly working = new Map<string, Promise<unknown>>();
+  /** Saves that have not started yet, per app. */
+  private readonly waiting = new Map<string, number>();
 
   constructor(db: Db, runner: Runner) {
     this.db = db;
@@ -134,6 +148,7 @@ export class AppStore {
       css: encoder.encode(row.web_css),
       bundleHash: row.bundle_hash,
       functions: new Map((JSON.parse(row.functions) as FunctionInfo[]).map((info) => [info.name, info])),
+      manifest: JSON.parse(row.manifest) as BuiltApp['manifest'],
     };
     this.cache.set(id, version);
     this.cachedBytes += version.js.length + version.css.length;
@@ -175,13 +190,20 @@ export class AppStore {
     return target === 'draft' ? this.draft(slug) : this.live(slug);
   }
 
-  /** A version by the hash in its file URLs: a page opened before a publication keeps loading its own files. */
-  byAssetHash(slug: string, assetHash: string): AppVersion | null {
+  /**
+   * A version by the hash in its file URLs: a page opened before a publication keeps loading
+   * its own files. Each address only serves its own: the published one what was published,
+   * the draft's the draft it serves now.
+   */
+  byAssetHash(slug: string, assetHash: string, target: Target): AppVersion | null {
     if (!/^[0-9a-f]{16}$/.test(assetHash)) return null;
+    const mine =
+      target === 'draft' ? 'v.id = (SELECT draft_version FROM apps WHERE slug = :slug)' : 'v.published_at IS NOT NULL';
     return this.version(
       get<{ id: number }>(
         this.db,
-        'SELECT id FROM app_versions WHERE app = :slug AND asset_hash = :hash ORDER BY id DESC LIMIT 1',
+        `SELECT v.id FROM app_versions v WHERE v.app = :slug AND v.asset_hash = :hash AND ${mine}
+         ORDER BY v.id DESC LIMIT 1`,
         { slug, hash: assetHash },
       )?.id,
     );
@@ -280,6 +302,12 @@ export class AppStore {
       );
       const versionId = this.record(slug, files, built, createdBy, now);
       this.setLive(slug, versionId, built.manifest, now);
+      // Nothing is being edited: the draft address serves what is published.
+      run(
+        this.db,
+        'UPDATE apps SET draft_version = :id WHERE slug = :slug AND NOT EXISTS (SELECT 1 FROM app_drafts WHERE app = :slug)',
+        { id: versionId, slug },
+      );
       this.prune(slug);
       return versionId;
     });
@@ -307,13 +335,41 @@ export class AppStore {
     return next;
   }
 
+  /**
+   * The same, for work an agent asks for: one save may wait behind the one that runs, a third
+   * is refused at once. A save holds a whole app's files in memory; they are not left to pile up.
+   */
+  private inTurnOrRefuse(slug: string, work: () => Promise<DeployOutcome>): Promise<DeployOutcome> {
+    const waiting = this.waiting.get(slug) ?? 0;
+    if (waiting >= 1) {
+      return Promise.resolve(
+        refused('a build of this app is already waiting for its turn: call again when it is done'),
+      );
+    }
+    this.waiting.set(slug, waiting + 1);
+    return this.inTurn(slug, async () => {
+      this.waiting.set(slug, (this.waiting.get(slug) ?? 1) - 1);
+      if (this.waiting.get(slug) === 0) this.waiting.delete(slug);
+      return work();
+    });
+  }
+
   // A build or a migration stopped at its deadline is an outcome like any other problem;
   // only a runner that is not there at all is an exception.
   private stopped(
     stage: 'build' | 'migrate',
     error: unknown,
   ): { ok: false; stage: typeof stage; problems: BuildProblem[] } {
-    if (!(error instanceof RunnerUnavailable) || !['timeout', 'memory', 'crashed'].includes(error.code)) throw error;
+    if (!(error instanceof RunnerUnavailable) || !['timeout', 'memory', 'crashed', 'busy'].includes(error.code)) {
+      throw error;
+    }
+    if (error.code === 'busy') {
+      return {
+        ok: false,
+        stage,
+        problems: [{ message: 'the platform is busy building other apps: try again in a moment' }],
+      };
+    }
     const what = stage === 'build' ? 'the build' : 'the migrations';
     const why =
       error.code === 'timeout' ? 'took too long' : error.code === 'memory' ? 'used too much memory' : 'failed';
@@ -413,7 +469,8 @@ export class AppStore {
     card: { name: string; description: string },
     createdBy: Pick<UserRow, 'id'>,
   ): 'created' | 'exists' | 'invalid' | 'full' {
-    if (!isValidSlug(slug)) return 'invalid';
+    // The demo app ships with the platform under that name, and comes and goes with DEMO_APP.
+    if (!isValidSlug(slug) || slug === DEMO_SLUG) return 'invalid';
     if (get(this.db, 'SELECT 1 AS found FROM apps WHERE slug = :slug', { slug })) return 'exists';
     if (get<{ n: number }>(this.db, 'SELECT COUNT(*) AS n FROM apps')!.n >= MAX_APPS) return 'full';
     run(
@@ -446,9 +503,10 @@ export class AppStore {
   }
 
   /**
-   * Saves the draft's files and builds them. The files are kept even when they do not build:
-   * the next edit starts from them. When they do, the draft address serves the result.
-   * `resetData` empties the draft's database first (after a migration was rewritten).
+   * Saves the draft's files and builds them. Files that have the right shape are kept even
+   * when they do not build: the next edit starts from them. When they do build, the draft
+   * address serves the result. `resetData` empties the draft's database first (after a
+   * migration was rewritten).
    */
   saveDraft(
     slug: string,
@@ -456,62 +514,94 @@ export class AppStore {
     by: Pick<UserRow, 'id'> | null,
     options: { resetData?: boolean } = {},
   ): Promise<DeployOutcome> {
-    return this.inTurn(slug, async () => {
-      const remember = (problems: BuildProblem[] | null) =>
-        run(
-          this.db,
-          `INSERT INTO app_drafts (app, files, updated_at, updated_by, problems)
-           VALUES (:slug, :files, :now, :by, :problems)
-           ON CONFLICT(app) DO UPDATE SET files = excluded.files, updated_at = excluded.updated_at,
-             updated_by = excluded.updated_by, problems = excluded.problems`,
-          {
-            slug,
-            files: JSON.stringify(files),
-            now: new Date().toISOString(),
-            by: by?.id ?? null,
-            problems: problems ? JSON.stringify(problems) : null,
-          },
-        );
-      if (!get(this.db, 'SELECT 1 AS found FROM apps WHERE slug = :slug', { slug })) {
-        return { ok: false, stage: 'build', problems: [{ message: `there is no app named "${slug}"` }] };
+    return this.inTurnOrRefuse(slug, () => this.saveNow(slug, files, by, options));
+  }
+
+  /**
+   * Changes some files of the draft and builds it. The draft is read when the edit takes its
+   * turn, not when it was asked for: two edits at once both land.
+   */
+  editDraft(
+    slug: string,
+    edits: { set?: Record<string, string>; remove?: readonly string[] },
+    by: Pick<UserRow, 'id'> | null,
+    options: { resetData?: boolean } = {},
+  ): Promise<DeployOutcome> {
+    return this.inTurnOrRefuse(slug, async () => {
+      const current = this.files(slug, 'draft');
+      if (!current) return refused(`there is no app named "${slug}"`);
+      const next = { ...current };
+      for (const path of edits.remove ?? []) {
+        if (!Object.hasOwn(next, path)) return refused('cannot delete a file that is not there', path);
+        delete next[path];
       }
-      const result = await this.build(slug, files);
-      if (!result.ok) {
-        remember(result.problems);
-        return result;
-      }
-      const { built } = result;
-      const migrated = await this.migrate(draftDatabase(slug), built.migrations, options.resetData === true);
-      if (!migrated.ok) {
-        remember(migrated.problems);
-        return migrated;
-      }
-      const current = get<{ draft_version: number | null }>(
-        this.db,
-        'SELECT draft_version FROM apps WHERE slug = :slug',
-        { slug },
-      )?.draft_version;
-      if (current && this.same(current, files, built)) {
-        remember(null);
-        return { ok: true, versionId: current, unchanged: true, applied: migrated.applied };
-      }
-      const versionId = transaction(this.db, () => {
-        remember(null);
-        const id = this.record(slug, files, built, by?.id ?? null, null);
-        run(this.db, 'UPDATE apps SET draft_version = :id WHERE slug = :slug', { id, slug });
-        this.prune(slug);
-        return id;
-      });
-      this.onDraft(slug);
-      return { ok: true, versionId, unchanged: false, applied: migrated.applied };
+      for (const [path, content] of Object.entries(edits.set ?? {})) next[path] = content;
+      return this.saveNow(slug, next, by, options);
     });
+  }
+
+  private async saveNow(
+    slug: string,
+    files: Record<string, string>,
+    by: Pick<UserRow, 'id'> | null,
+    options: { resetData?: boolean },
+  ): Promise<DeployOutcome> {
+    const remember = (problems: BuildProblem[] | null) =>
+      run(
+        this.db,
+        `INSERT INTO app_drafts (app, files, updated_at, updated_by, problems)
+         VALUES (:slug, :files, :now, :by, :problems)
+         ON CONFLICT(app) DO UPDATE SET files = excluded.files, updated_at = excluded.updated_at,
+           updated_by = excluded.updated_by, problems = excluded.problems`,
+        {
+          slug,
+          files: JSON.stringify(files),
+          now: new Date().toISOString(),
+          by: by?.id ?? null,
+          problems: problems ? JSON.stringify(problems) : null,
+        },
+      );
+    const app = get<{ draft_version: number | null }>(this.db, 'SELECT draft_version FROM apps WHERE slug = :slug', {
+      slug,
+    });
+    if (!app) return refused(`there is no app named "${slug}"`);
+    // Count, paths and sizes are checked before anything is kept: what is stored here is read
+    // again by every page and tool that shows the draft.
+    const misshapen = checkFiles(files);
+    if (misshapen.length > 0) return { ok: false, stage: 'refused', problems: misshapen.slice(0, 20) };
+    const result = await this.build(slug, files);
+    if (!result.ok) {
+      remember(result.problems);
+      return result;
+    }
+    const { built } = result;
+    const migrated = await this.migrate(draftDatabase(slug), built.migrations, options.resetData === true);
+    if (!migrated.ok) {
+      remember(migrated.problems);
+      return migrated;
+    }
+    if (app.draft_version && this.same(app.draft_version, files, built)) {
+      remember(null);
+      return { ok: true, versionId: app.draft_version, unchanged: true, applied: migrated.applied };
+    }
+    const versionId = transaction(this.db, () => {
+      remember(null);
+      const id = this.record(slug, files, built, by?.id ?? null, null);
+      run(this.db, 'UPDATE apps SET draft_version = :id WHERE slug = :slug', { id, slug });
+      this.prune(slug);
+      return id;
+    });
+    this.onDraft(slug);
+    return { ok: true, versionId, unchanged: false, applied: migrated.applied };
   }
 
   /**
    * Makes the draft the published version: the published database gets the draft's migrations,
    * then members get its screens and functions. Nothing changes when a migration fails.
+   * `shown` is the draft version the administrator was looking at: a draft that was built
+   * again since is not published in its place.
    */
-  publishDraft(slug: string): Promise<DeployOutcome> {
+  publishDraft(slug: string, shown?: number): Promise<DeployOutcome> {
     return this.inTurn(slug, async () => {
       const app = get<{ live_version: number | null; draft_version: number | null }>(
         this.db,
@@ -521,9 +611,10 @@ export class AppStore {
       const draft = get<{ problems: string | null }>(this.db, 'SELECT problems FROM app_drafts WHERE app = :slug', {
         slug,
       });
-      if (!app?.draft_version || draft?.problems) {
-        const message = draft?.problems ? 'the draft does not build' : 'there is no draft to publish';
-        return { ok: false, stage: 'build', problems: [{ message }] };
+      if (!app?.draft_version) return refused('there is no draft to publish');
+      if (draft?.problems) return refused('the draft does not build');
+      if (shown !== undefined && shown !== app.draft_version) {
+        return refused('the draft changed since it was shown: look at it again before publishing');
       }
       const version = get<{ id: number; manifest: string; migrations: string }>(
         this.db,
@@ -544,14 +635,34 @@ export class AppStore {
     });
   }
 
-  /** Gives up the draft's edits: the draft is the published version again. */
-  discardDraft(slug: string): void {
-    transaction(this.db, () => {
-      run(this.db, 'DELETE FROM app_drafts WHERE app = :slug', { slug });
-      run(this.db, 'UPDATE apps SET draft_version = live_version WHERE slug = :slug', { slug });
-      this.prune(slug);
+  /**
+   * Gives up the draft's edits: the draft is the published version again, on a database
+   * rebuilt from the published version's migrations (what the discarded draft added to its
+   * schema goes with it).
+   */
+  discardDraft(slug: string): Promise<DeployOutcome> {
+    return this.inTurn(slug, async () => {
+      const app = get<{ live_version: number | null }>(this.db, 'SELECT live_version FROM apps WHERE slug = :slug', {
+        slug,
+      });
+      if (!app?.live_version) return refused('there is no published version to come back to');
+      const version = get<{ migrations: string }>(this.db, 'SELECT migrations FROM app_versions WHERE id = :id', {
+        id: app.live_version,
+      })!;
+      const migrated = await this.migrate(
+        draftDatabase(slug),
+        JSON.parse(version.migrations) as BuiltApp['migrations'],
+        true,
+      );
+      if (!migrated.ok) return migrated;
+      transaction(this.db, () => {
+        run(this.db, 'DELETE FROM app_drafts WHERE app = :slug', { slug });
+        run(this.db, 'UPDATE apps SET draft_version = live_version WHERE slug = :slug', { slug });
+        this.prune(slug);
+      });
+      this.onDraft(slug);
+      return { ok: true, versionId: app.live_version, unchanged: false, applied: migrated.applied };
     });
-    this.onDraft(slug);
   }
 
   /** The files publishing the draft would add, change or remove. Null when the app does not exist. */
@@ -640,15 +751,18 @@ export class AppStore {
   /** Keeps a line of what an app's function printed or failed with. */
   log(slug: string, target: Target, level: string, fn: string | null, message: string): void {
     try {
-      const { lastInsertRowid } = run(
+      run(
         this.db,
         'INSERT INTO app_logs (app, target, at, level, fn, message) VALUES (:slug, :target, :at, :level, :fn, :message)',
         { slug, target, at: new Date().toISOString(), level, fn, message: message.slice(0, MAX_LOG_LENGTH) },
       );
-      run(this.db, 'DELETE FROM app_logs WHERE app = :slug AND id <= :floor', {
-        slug,
-        floor: lastInsertRowid - KEPT_LOGS,
-      });
+      // The last lines of this app at this address: what other apps, or its draft, log does not count.
+      run(
+        this.db,
+        `DELETE FROM app_logs WHERE app = :slug AND target = :target AND id NOT IN (
+           SELECT id FROM app_logs WHERE app = :slug AND target = :target ORDER BY id DESC LIMIT ${KEPT_LOGS})`,
+        { slug, target },
+      );
     } catch {
       // A log line never fails the call it describes (the app may just have been removed).
     }

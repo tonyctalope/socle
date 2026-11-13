@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { html } from 'hono/html';
 import { DEMO_SLUG, listApps } from '../apps/registry.ts';
+import type { DeployOutcome } from '../apps/store.ts';
 import { siteOf } from '../apps/slug.ts';
 import { appOrigin } from '../config.ts';
 import { translator } from '../i18n.ts';
@@ -42,12 +43,18 @@ export function adminRoutes(deps: Deps): Hono<ControlEnv> {
   const removable = (slug: string) => !(config.demoApp && slug === DEMO_SLUG);
 
   app.get('/admin/', (c) => {
-    const notice = c.req.query('published')
-      ? t('{name} is published.', { name: c.req.query('published')! })
-      : c.req.query('discarded')
-        ? t('The draft of {name} was discarded.', { name: c.req.query('discarded')! })
-        : c.req.query('removed')
-          ? t('{name} was removed.', { name: c.req.query('removed')! })
+    // The address only names an app: what the notice says is read from the app's own state, so
+    // that a link from elsewhere cannot make this page announce what did not happen.
+    const done = (param: string) => deps.apps.status(c.req.query(param) ?? '');
+    const published = done('published');
+    const discarded = done('discarded');
+    const settled = (status: typeof published) => status?.live && !status.draft.differs;
+    const notice = settled(published)
+      ? t('{name} is published.', { name: published!.name })
+      : settled(discarded)
+        ? t('The draft of {name} was discarded.', { name: discarded!.name })
+        : c.req.query('removed') && !done('removed')
+          ? t('The app was removed.')
           : null;
     const rows = listApps(db).map((row) => ({
       row,
@@ -97,6 +104,7 @@ export function adminRoutes(deps: Deps): Hono<ControlEnv> {
                         </ul>
                       </details>
                       <form class="actions" method="post" action="/admin/apps/${row.slug}/publish">
+                        <input type="hidden" name="version" value="${status.draft.versionId ?? ''}" />
                         <button class="primary" type="submit" ${status.draft.problems ? 'disabled' : ''}>
                           ${t('Publish the draft')}
                         </button>
@@ -162,28 +170,35 @@ export function adminRoutes(deps: Deps): Hono<ControlEnv> {
       // An app created later under the same name is another app: nobody stays connected to it.
       revokeResource(db, appResource(config, slug));
       console.info(`[${slug}] removed by ${c.get('session')!.user.email}`);
-      return c.redirect(`/admin/?removed=${encodeURIComponent(status.name)}`, 303);
+      return c.redirect(`/admin/?removed=${slug}`, 303);
     }
-    if (action === 'discard') {
-      deps.apps.discardDraft(slug);
-      return c.redirect(`/admin/?discarded=${encodeURIComponent(status.name)}`, 303);
-    }
-    const outcome = await deps.apps.publishDraft(slug);
-    if (!outcome.ok) {
+    const refusal = (title: string, outcome: Extract<DeployOutcome, { ok: false }>) => {
       const reasons = outcome.problems.map((problem) => `${problem.file ? `${problem.file}: ` : ''}${problem.message}`);
-      console.warn(`[${slug}] publication refused: ${reasons.join('; ')}`);
+      console.warn(`[${slug}] ${action} refused: ${reasons.join('; ')}`);
       return c.html(
         messagePage(
           config.locale,
-          t('Not published'),
+          title,
           `${t('Nothing changed for the members.')} ${reasons.slice(0, 5).join(' — ')}`,
           back,
         ),
         409,
       );
+    };
+    if (action === 'discard') {
+      const discarding = await deps.apps.discardDraft(slug);
+      if (!discarding.ok) return refusal(t('Not discarded'), discarding);
+      return c.redirect(`/admin/?discarded=${slug}`, 303);
     }
+    // The form names the draft version its page showed: a draft built again since is not
+    // published in its place.
+    const form = await c.req.parseBody().catch(() => ({}) as Record<string, unknown>);
+    const shown = Number(form.version);
+    if (!Number.isInteger(shown) || shown <= 0) return c.text('Invalid request', 400);
+    const outcome = await deps.apps.publishDraft(slug, shown);
+    if (!outcome.ok) return refusal(t('Not published'), outcome);
     console.info(`[${slug}] version ${outcome.versionId} published by ${c.get('session')!.user.email}`);
-    return c.redirect(`/admin/?published=${encodeURIComponent(deps.apps.status(slug)!.name)}`, 303);
+    return c.redirect(`/admin/?published=${slug}`, 303);
   });
 
   return app;

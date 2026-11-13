@@ -17,6 +17,8 @@ export const DEFAULT_GATE: GateOptions = { perApp: 2, waitingPerApp: 16, maxWait
 interface Lane {
   running: number;
   waiting: (() => void)[];
+  /** Calls of the capped kind (the draft's) that are running or waiting. */
+  capped: number;
 }
 
 export class CallGate {
@@ -31,13 +33,38 @@ export class CallGate {
    * Runs `task` when it is this app's turn. Returns 'busy' without running it when too many
    * calls of the app are already waiting or the wait was too long, and 'gone' when whoever
    * asked has left in the meantime (`signal`).
+   *
+   * An app's two addresses share its places. `most` caps how many of them one kind of call
+   * (the draft's) may hold or wait for at once, so that trying a draft never takes every
+   * place of the published app.
    */
-  async run<T>(app: string, signal: AbortSignal | undefined, task: () => Promise<T>): Promise<T | 'busy' | 'gone'> {
+  async run<T>(
+    app: string,
+    signal: AbortSignal | undefined,
+    task: () => Promise<T>,
+    most?: number,
+  ): Promise<T | 'busy' | 'gone'> {
     let lane = this.lanes.get(app);
     if (!lane) {
-      lane = { running: 0, waiting: [] };
+      lane = { running: 0, waiting: [], capped: 0 };
       this.lanes.set(app, lane);
     }
+    if (most === undefined) return this.take(app, lane, signal, task);
+    if (lane.capped >= most) return 'busy';
+    lane.capped += 1;
+    try {
+      return await this.take(app, lane, signal, task);
+    } finally {
+      lane.capped -= 1;
+    }
+  }
+
+  private async take<T>(
+    app: string,
+    lane: Lane,
+    signal: AbortSignal | undefined,
+    task: () => Promise<T>,
+  ): Promise<T | 'busy' | 'gone'> {
     if (lane.running >= this.options.perApp) {
       if (lane.waiting.length >= this.options.waitingPerApp) return 'busy';
       const waited = await this.wait(lane, signal);
@@ -54,7 +81,7 @@ export class CallGate {
         next();
       } else {
         lane.running -= 1;
-        if (lane.running === 0) this.lanes.delete(app);
+        if (lane.running === 0 && this.lanes.get(app) === lane) this.lanes.delete(app);
       }
     }
   }

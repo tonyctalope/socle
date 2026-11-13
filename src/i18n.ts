@@ -64,7 +64,8 @@ const FR: Record<string, string> = {
   'Discard the draft': 'Abandonner le brouillon',
   'Not published': 'Non publiée',
   'Nothing changed for the members.': 'Rien n’a changé pour les membres.',
-  '{name} was removed.': '{name} a été supprimée.',
+  'The app was removed.': 'L’appli a été supprimée.',
+  'Not discarded': 'Brouillon non abandonné',
   'Remove this app…': 'Supprimer cette appli…',
   'Remove {name}?': 'Supprimer {name} ?',
   'The app disappears for everyone, with its draft and everything people put in it. Its data stays on the server for a month, out of reach of the app, then is deleted.':
