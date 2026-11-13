@@ -384,12 +384,17 @@ export function applyMigrations(
   if (names.some((name, index) => index > 0 && name <= names[index - 1]!)) {
     throw new MigrationError(names[0] ?? '', 'migrations must have distinct names, given in ascending order');
   }
-  // Dropping a table deletes its rows first: with foreign keys on, the rows that point at it
-  // would refuse. The setting cannot change inside a transaction.
-  if (options.reset) db.exec('PRAGMA foreign_keys = OFF');
   try {
     db.exec('BEGIN IMMEDIATE');
-    if (options.reset) dropEverything(db);
+    if (options.reset) {
+      // Dropping a table deletes its rows first, and the rows that point at them would refuse:
+      // while everything is dropped, foreign keys wait for COMMIT (when nothing is left to
+      // check). The migrations then run as they do on any database, cascades included: a draft
+      // that starts again must end up with what the published data would get.
+      db.exec('PRAGMA defer_foreign_keys = ON');
+      dropEverything(db);
+      db.exec('PRAGMA defer_foreign_keys = OFF');
+    }
     db.exec(
       `CREATE TABLE IF NOT EXISTS ${PLATFORM_PREFIX}migrations (
          name TEXT PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL
@@ -466,17 +471,6 @@ export function applyMigrations(
         `the schema is too large: ${schema.objects} tables, indexes, views and triggers (limit ${limits.maxSchemaObjects}), ${schema.bytes} characters of definitions (limit ${limits.maxSchemaBytes})`,
       );
     }
-    if (options.reset) {
-      // The migrations ran with foreign keys off (see above): what they wrote is checked now,
-      // so that a draft accepts nothing the published database would refuse.
-      const broken = db.prepare('PRAGMA foreign_key_check').get() as { table: string } | undefined;
-      if (broken) {
-        throw new MigrationError(
-          applied.at(-1) ?? names.at(-1) ?? '',
-          `FOREIGN KEY constraint failed (a row of ${broken.table} points at a row that does not exist)`,
-        );
-      }
-    }
     db.exec('COMMIT');
     return { applied };
   } catch (error) {
@@ -486,8 +480,6 @@ export function applyMigrations(
       // the transaction is already gone
     }
     throw error;
-  } finally {
-    if (options.reset) db.exec('PRAGMA foreign_keys = ON');
   }
 }
 
