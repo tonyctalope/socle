@@ -9,23 +9,23 @@ import { DEMO_SLUG, syncDemoApp } from '../src/apps/demo.ts';
 import { backupApps } from '../src/jobs.ts';
 import { RunnerUnavailable } from '../src/runner/client.ts';
 import { DEFAULT_LIMITS } from '../src/runner/limits.ts';
-import { Browser, CHLOE, DEMO, setup, signIn, TONY, type TestContext } from './helpers.ts';
+import { ALICE, BOB, Browser, CONTROL, DEMO, setup, signIn, type TestContext } from './helpers.ts';
 
 // Apps end to end, as browsers see them: sources go in, the runner builds them, and
 // pages call the app's server functions through the platform.
 
 const TEST_LIMITS = { ...DEFAULT_LIMITS, callMs: 400, killGraceMs: 300 };
-const COURSES = 'https://courses.apps.test';
+const GROCERIES = 'https://groceries.apps.test';
 const SECRETS = 'https://secrets.apps.test';
 
-const courses = (extra: Record<string, string> = {}) => ({
-  'app.json': JSON.stringify({ name: 'Courses', description: 'La liste de la maison', themeColor: '#2F5D8A' }),
+const groceries = (extra: Record<string, string> = {}) => ({
+  'app.json': JSON.stringify({ name: 'Groceries', description: 'The shared shopping list', themeColor: '#2F5D8A' }),
   'web/main.tsx': `
     import { useQuery } from '@socle/sdk';
     import { Page } from '@socle/ui';
     export default function App() {
       const items = useQuery('list');
-      return <Page title="Courses"><p className="text-brand md:p-4">{JSON.stringify(items.data)}</p></Page>;
+      return <Page title="Groceries"><p className="text-brand md:p-4">{JSON.stringify(items.data)}</p></Page>;
     }`,
   'web/style.css': '@theme { --color-brand: #0a7a3d; }',
   'migrations/001_init.sql':
@@ -37,11 +37,11 @@ const courses = (extra: Record<string, string> = {}) => ({
     export const add = mutation({
       input: v.object({ label: v.string().min(1).max(40) }),
       handler: ({ db, user, notify }, { label }) => {
-        if (label === 'interdit') fail('Pas ça.', 'forbidden_item');
+        if (label === 'forbidden') fail('Not that.', 'forbidden_item');
         if (label === 'bug') return undefinedVariable;
         const { lastInsertRowid } = db.run('INSERT INTO items (label, author) VALUES (?, ?)', label, user.id);
-        notify('others', { title: user.name + ' a ajouté ' + label, url: '/item/' + lastInsertRowid });
-        notify([user.id, 999], { title: 'Ajouté', body: label });
+        notify('others', { title: user.name + ' added ' + label, url: '/item/' + lastInsertRowid });
+        notify([user.id, 999], { title: 'Added', body: label });
         return lastInsertRowid;
       },
     });
@@ -55,32 +55,32 @@ const courses = (extra: Record<string, string> = {}) => ({
 
 describe('an app, from its sources to the browser', () => {
   let ctx: TestContext;
-  let tony: Browser;
-  let chloe: Browser;
-  let tonyId: number;
-  let chloeId: number;
+  let bob: Browser;
+  let alice: Browser;
+  let bobId: number;
+  let aliceId: number;
 
   before(async () => {
-    ctx = setup({ limits: TEST_LIMITS });
+    ctx = setup({ limits: TEST_LIMITS, env: { APP_TIMEZONE: 'Europe/Paris' } });
     // A shorter patience than in production, so that the flood test does not take long.
     ctx.deps.gate = new CallGate({ perApp: 2, waitingPerApp: 16, maxWaitMs: 1_500 });
     ctx.deps.streamPingMs = 40;
-    tony = new Browser(ctx.app);
-    chloe = new Browser(ctx.app);
-    tonyId = signIn(ctx, tony, TONY).userId;
-    chloeId = signIn(ctx, chloe, CHLOE).userId;
-    assert.deepEqual(await ctx.deps.apps.deploy('courses', courses(), { id: tonyId }), {
+    bob = new Browser(ctx.app);
+    alice = new Browser(ctx.app);
+    bobId = signIn(ctx, bob, BOB).userId;
+    aliceId = signIn(ctx, alice, ALICE).userId;
+    assert.deepEqual(await ctx.deps.apps.deploy('groceries', groceries(), { id: bobId }), {
       ok: true,
       versionId: 2,
       unchanged: false,
       applied: ['001_init.sql'],
     });
-    await tony.navigate(`${COURSES}/`);
-    await chloe.navigate(`${COURSES}/`);
+    await bob.navigate(`${GROCERIES}/`);
+    await alice.navigate(`${GROCERIES}/`);
   });
   after(() => ctx.cleanup());
 
-  const call = (browser: Browser, name: string, body: unknown = {}, origin = COURSES) =>
+  const call = (browser: Browser, name: string, body: unknown = {}, origin = GROCERIES) =>
     browser.fetch(`${origin}/_socle/api/fn/${name}`, { method: 'POST', json: body });
   const value = async (response: Response) => {
     assert.equal(response.status, 200, await response.clone().text());
@@ -88,11 +88,11 @@ describe('an app, from its sources to the browser', () => {
   };
 
   it('serves a page written by the platform around the built app', async () => {
-    const { response } = await tony.navigate(`${COURSES}/liste?x=1`);
+    const { response } = await bob.navigate(`${GROCERIES}/liste?x=1`);
     assert.equal(response.status, 200);
     assert.equal(response.headers.get('cache-control'), 'no-store');
     const page = await response.text();
-    assert.match(page, /<title>Courses<\/title>/);
+    assert.match(page, /<title>Groceries<\/title>/);
     assert.match(page, /<meta name="theme-color" content="#2f5d8a" \/>/);
     assert.match(page, /<link rel="stylesheet" href="\/_socle\/vendor\/ui\.css" \/>/);
     const script = /<script type="module" src="(\/assets\/[0-9a-f]{16}\/main\.js)"><\/script>/.exec(page)?.[1];
@@ -108,19 +108,19 @@ describe('an app, from its sources to the browser', () => {
       app: unknown;
       push: { publicKey: string };
     };
-    assert.deepEqual(boot.user, { id: tonyId, name: 'tony' });
+    assert.deepEqual(boot.user, { id: bobId, name: 'bob' });
     assert.deepEqual(boot.members, [
-      { id: tonyId, name: 'tony' },
-      { id: chloeId, name: 'chloe' },
+      { id: bobId, name: 'bob' },
+      { id: aliceId, name: 'alice' },
     ]);
-    assert.deepEqual(boot.app, { slug: 'courses', name: 'Courses' });
+    assert.deepEqual(boot.app, { slug: 'groceries', name: 'Groceries' });
     assert.equal(boot.push.publicKey, ctx.push.publicKey);
     assert.doesNotMatch(page, /@example\./);
 
-    const js = await (await tony.request(`${COURSES}${script}`)).text();
+    const js = await (await bob.request(`${GROCERIES}${script}`)).text();
     assert.match(js, /from"\/_socle\/vendor\/sdk\.js"/);
     assert.doesNotMatch(js, /node_modules|createElement\(/, 'React is not bundled into the app');
-    const css = await (await tony.request(`${COURSES}${script.replace('main.js', 'style.css')}`)).text();
+    const css = await (await bob.request(`${GROCERIES}${script.replace('main.js', 'style.css')}`)).text();
     assert.match(css, /\.text-brand\{color:var\(--color-brand\)\}/);
     assert.match(css, /--color-brand: ?#0a7a3d/);
     assert.doesNotMatch(css, /box-sizing/, 'base styles come once, from the platform stylesheet');
@@ -128,9 +128,9 @@ describe('an app, from its sources to the browser', () => {
 
   it('cannot break out of the page through a name', async () => {
     const hostile = '</script><script>alert(1)</script><!--';
-    ctx.deps.db.prepare('UPDATE users SET name = ? WHERE id = ?').run(hostile, chloeId);
+    ctx.deps.db.prepare('UPDATE users SET name = ? WHERE id = ?').run(hostile, aliceId);
     try {
-      const page = await (await tony.navigate(`${COURSES}/`)).response.text();
+      const page = await (await bob.navigate(`${GROCERIES}/`)).response.text();
       assert.equal((page.match(/<script/g) ?? []).length, 2);
       assert.doesNotMatch(page, /alert\(1\)<\/script>/);
       const boot = JSON.parse(
@@ -140,24 +140,24 @@ describe('an app, from its sources to the browser', () => {
       };
       assert.equal(boot.members[1]!.name, hostile);
     } finally {
-      ctx.deps.db.prepare('UPDATE users SET name = ? WHERE id = ?').run('chloe', chloeId);
+      ctx.deps.db.prepare('UPDATE users SET name = ? WHERE id = ?').run('alice', aliceId);
     }
   });
 
   it('runs the app’s functions for signed-in members, with who they are', async () => {
-    assert.deepEqual(await value(await call(tony, 'list')), []);
-    assert.equal(await value(await call(tony, 'add', { input: { label: 'Pain' } })), 1);
-    assert.equal(await value(await call(chloe, 'add', { input: { label: 'Lait' } })), 2);
-    assert.deepEqual(await value(await call(chloe, 'list', { query: true })), [
-      { id: 1, label: 'Pain', author: tonyId },
-      { id: 2, label: 'Lait', author: chloeId },
+    assert.deepEqual(await value(await call(bob, 'list')), []);
+    assert.equal(await value(await call(bob, 'add', { input: { label: 'Pain' } })), 1);
+    assert.equal(await value(await call(alice, 'add', { input: { label: 'Lait' } })), 2);
+    assert.deepEqual(await value(await call(alice, 'list', { query: true })), [
+      { id: 1, label: 'Pain', author: bobId },
+      { id: 2, label: 'Lait', author: aliceId },
     ]);
     ctx.clock.now = new Date('2027-01-15T23:30:00Z'); // already the 16th in Paris
-    assert.deepEqual(await value(await call(chloe, 'context')), {
-      user: { id: chloeId, name: 'chloe' },
+    assert.deepEqual(await value(await call(alice, 'context')), {
+      user: { id: aliceId, name: 'alice' },
       members: [
-        { id: tonyId, name: 'tony' },
-        { id: chloeId, name: 'chloe' },
+        { id: bobId, name: 'bob' },
+        { id: aliceId, name: 'alice' },
       ],
       now: Date.parse('2027-01-15T23:30:00Z'),
       today: '2027-01-16',
@@ -167,95 +167,95 @@ describe('an app, from its sources to the browser', () => {
 
   it('answers failures in a way the page can show', async () => {
     const problem = async (response: Response) => ({ status: response.status, ...((await response.json()) as object) });
-    assert.deepEqual(await problem(await call(tony, 'add', { input: { label: '' } })), {
+    assert.deepEqual(await problem(await call(bob, 'add', { input: { label: '' } })), {
       status: 400,
       error: 'invalid_input',
       message: 'input.label: must not be empty',
     });
-    assert.deepEqual(await problem(await call(tony, 'add', { input: { label: 'interdit' } })), {
+    assert.deepEqual(await problem(await call(bob, 'add', { input: { label: 'forbidden' } })), {
       status: 422,
       error: 'forbidden_item',
-      message: 'Pas ça.',
+      message: 'Not that.',
     });
     // A bug of the app says nothing about its insides to the browser.
-    assert.deepEqual(await problem(await call(tony, 'add', { input: { label: 'bug' } })), {
+    assert.deepEqual(await problem(await call(bob, 'add', { input: { label: 'bug' } })), {
       status: 500,
       error: 'app_error',
-      message: 'L’appli a rencontré une erreur.',
+      message: 'The app ran into an error.',
     });
-    assert.deepEqual(await problem(await call(tony, 'spin')), {
+    assert.deepEqual(await problem(await call(bob, 'spin')), {
       status: 504,
       error: 'timeout',
-      message: 'L’appli a mis trop de temps à répondre.',
+      message: 'The app took too long to answer.',
     });
-    assert.equal((await call(tony, 'nope')).status, 404);
-    assert.equal((await call(tony, 'toString')).status, 404);
-    assert.equal((await call(tony, 'add', 'not an object')).status, 400);
-    assert.equal((await tony.request(`${COURSES}/_socle/api/fn/add`, { method: 'POST', body: '{}' })).status, 403);
+    assert.equal((await call(bob, 'nope')).status, 404);
+    assert.equal((await call(bob, 'toString')).status, 404);
+    assert.equal((await call(bob, 'add', 'not an object')).status, 400);
+    assert.equal((await bob.request(`${GROCERIES}/_socle/api/fn/add`, { method: 'POST', body: '{}' })).status, 403);
     // A screen that only reads never writes by accident.
-    const mistaken = await call(tony, 'add', { query: true, input: { label: 'Fantôme' } });
+    const mistaken = await call(bob, 'add', { query: true, input: { label: 'Fantôme' } });
     assert.deepEqual(await problem(mistaken), {
       status: 400,
       error: 'not_a_query',
-      message: 'add modifie des données : appelle-la avec api.add().',
+      message: 'add changes data: call it with api.add().',
     });
-    assert.equal(((await value(await call(tony, 'list'))) as unknown[]).length, 2);
+    assert.equal(((await value(await call(bob, 'list'))) as unknown[]).length, 2);
   });
 
   it('keeps answers and requests within bounds, whatever the app or the page sends', async () => {
     // A function that fails with megabytes of text: the page gets a short answer.
-    const loud = await call(tony, 'loud', { input: { size: 3_000_000 } });
+    const loud = await call(bob, 'loud', { input: { size: 3_000_000 } });
     assert.equal(loud.status, 422);
     const body = await loud.text();
     assert.ok(body.length < 2_500, `an error answer of ${body.length} characters`);
     assert.equal((JSON.parse(body) as { error: string }).error, 'failed');
     // Input nested deeper than anything can carry is refused as input, not as a crash.
     const deep = `${'{"a":'.repeat(20_000)}1${'}'.repeat(20_000)}`;
-    const nested = await tony.request(`${COURSES}/_socle/api/fn/echo`, {
+    const nested = await bob.request(`${GROCERIES}/_socle/api/fn/echo`, {
       method: 'POST',
-      headers: { origin: COURSES, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
+      headers: { origin: GROCERIES, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
       body: `{"input":${deep}}`,
     });
     assert.equal(nested.status, 400);
     assert.equal(((await nested.json()) as { error: string }).error, 'invalid_input');
     // What a function returns reaches the page as it is, whatever is in it.
     const tricky = { text: '</script>"\\\u2028', list: [1, [2, [3]]], nothing: null };
-    assert.deepEqual(await value(await call(tony, 'echo', { input: tricky })), tricky);
+    assert.deepEqual(await value(await call(bob, 'echo', { input: tricky })), tricky);
     // Sixty-four levels are plenty; more is refused before any function sees it.
     const nest = (levels: number) => ({ input: JSON.parse(`${'['.repeat(levels)}1${']'.repeat(levels)}`) as unknown });
-    assert.equal((await call(tony, 'echo', nest(64))).status, 200);
-    assert.equal((await call(tony, 'echo', nest(65))).status, 400);
+    assert.equal((await call(bob, 'echo', nest(64))).status, 200);
+    assert.equal((await call(bob, 'echo', nest(65))).status, 400);
     assert.equal(
-      (await call(tony, 'echo', { input: { text: '[[['.repeat(100) } })).status,
+      (await call(bob, 'echo', { input: { text: '[[['.repeat(100) } })).status,
       200,
       'brackets in text are text',
     );
   });
 
   it('refuses calls that do not come from the app’s own pages', async () => {
-    const before = ((await value(await call(tony, 'list'))) as unknown[]).length;
-    const url = `${COURSES}/_socle/api/fn/add`;
+    const before = ((await value(await call(bob, 'list'))) as unknown[]).length;
+    const url = `${GROCERIES}/_socle/api/fn/add`;
     const json = { input: { label: 'Intrus' } };
-    // A page of another app, of the control plane, or of anywhere else, with Tony's cookies attached.
+    // A page of another app, of the control plane, or of anywhere else, with Bob's cookies attached.
     for (const pageOrigin of [DEMO, 'https://socle.test', 'https://evil.example']) {
-      assert.equal((await tony.fetch(url, { method: 'POST', json, pageOrigin })).status, 403, pageOrigin);
+      assert.equal((await bob.fetch(url, { method: 'POST', json, pageOrigin })).status, 403, pageOrigin);
     }
-    assert.equal((await tony.request(url, { method: 'POST', body: JSON.stringify(json) })).status, 403, 'no Origin');
-    assert.equal((await tony.fetch(url, { method: 'GET' })).status, 404);
+    assert.equal((await bob.request(url, { method: 'POST', body: JSON.stringify(json) })).status, 403, 'no Origin');
+    assert.equal((await bob.fetch(url, { method: 'GET' })).status, 404);
     assert.equal((await new Browser(ctx.app).fetch(url, { method: 'POST', json })).status, 401);
     // A session of another app is worth nothing here.
     const elsewhere = new Browser(ctx.app);
-    signIn(ctx, elsewhere, TONY);
+    signIn(ctx, elsewhere, BOB);
     await elsewhere.navigate(`${DEMO}/`);
-    elsewhere.setCookie(COURSES, '__Host-socle_app', elsewhere.cookie(DEMO, '__Host-socle_app')!);
+    elsewhere.setCookie(GROCERIES, '__Host-socle_app', elsewhere.cookie(DEMO, '__Host-socle_app')!);
     assert.equal((await elsewhere.fetch(url, { method: 'POST', json })).status, 401);
-    assert.equal(((await value(await call(tony, 'list'))) as unknown[]).length, before);
+    assert.equal(((await value(await call(bob, 'list'))) as unknown[]).length, before);
   });
 
   it('keeps each app’s data to itself', async () => {
     const outcome = await ctx.deps.apps.deploy(
       'secrets',
-      courses({
+      groceries({
         'app.json': '{ "name": "Secrets" }',
         'server/index.ts': `
           import { mutation, query } from '@socle/server';
@@ -267,47 +267,47 @@ describe('an app, from its sources to the browser', () => {
       null,
     );
     assert.ok(outcome.ok);
-    await tony.navigate(`${SECRETS}/`);
-    assert.equal(await value(await call(tony, 'add', { input: { label: 'code du coffre' } }, SECRETS)), 1);
-    assert.deepEqual(await value(await call(tony, 'list', {}, SECRETS)), [{ label: 'code du coffre' }]);
-    const labels = ((await value(await call(tony, 'list'))) as { label: string }[]).map((item) => item.label);
+    await bob.navigate(`${SECRETS}/`);
+    assert.equal(await value(await call(bob, 'add', { input: { label: 'code du coffre' } }, SECRETS)), 1);
+    assert.deepEqual(await value(await call(bob, 'list', {}, SECRETS)), [{ label: 'code du coffre' }]);
+    const labels = ((await value(await call(bob, 'list'))) as { label: string }[]).map((item) => item.label);
     assert.ok(!labels.includes('code du coffre'));
     // The function exists in one app only, and that app cannot name the other's database.
-    assert.equal((await call(tony, 'steal', { input: { sql: 'SELECT 1' } })).status, 404);
+    assert.equal((await call(bob, 'steal', { input: { sql: 'SELECT 1' } })).status, 404);
     for (const sql of [
-      "ATTACH 'courses/live.db' AS c",
-      'SELECT * FROM courses.items',
+      "ATTACH 'groceries/live.db' AS c",
+      'SELECT * FROM groceries.items',
       'SELECT * FROM pragma_database_list',
     ]) {
-      assert.equal((await call(tony, 'steal', { input: { sql } }, SECRETS)).status, 500, sql);
+      assert.equal((await call(bob, 'steal', { input: { sql } }, SECRETS)).status, 500, sql);
     }
   });
 
   it('sends the notifications a mutation asked for, to members of the app only', async () => {
     ctx.push.sent.length = 0;
-    const id = await value(await call(tony, 'add', { input: { label: 'Œufs' } }));
+    const id = await value(await call(bob, 'add', { input: { label: 'Œufs' } }));
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(
       ctx.push.sent.map((sent) => ({ ...sent, message: { ...sent.message, tag: undefined } })),
       [
         {
-          userId: chloeId,
-          app: 'courses',
-          message: { title: 'tony a ajouté Œufs', body: '', url: `/item/${id}`, tag: undefined },
+          userId: aliceId,
+          app: 'groceries',
+          message: { title: 'bob added Œufs', body: '', url: `/item/${id}`, tag: undefined },
         },
         // 999 is nobody: dropped.
-        { userId: tonyId, app: 'courses', message: { title: 'Ajouté', body: 'Œufs', url: '/', tag: undefined } },
+        { userId: bobId, app: 'groceries', message: { title: 'Added', body: 'Œufs', url: '/', tag: undefined } },
       ],
     );
     // A call that fails notifies nobody.
     ctx.push.sent.length = 0;
-    await call(tony, 'add', { input: { label: 'interdit' } });
+    await call(bob, 'add', { input: { label: 'forbidden' } });
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(ctx.push.sent.length, 0);
   });
 
   /** Opens the event stream of a page and returns a way to wait for its next event. */
-  async function events(browser: Browser, origin = COURSES) {
+  async function events(browser: Browser, origin = GROCERIES) {
     const response = await browser.request(`${origin}/_socle/api/events`, {
       headers: { accept: 'text/event-stream', 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'cors' },
     });
@@ -341,59 +341,59 @@ describe('an app, from its sources to the browser', () => {
   }
 
   it('tells every open page when the app’s data changed', async () => {
-    const stream = await events(chloe);
+    const stream = await events(alice);
     assert.equal(stream.response.status, 200);
     assert.match(stream.response.headers.get('content-type')!, /^text\/event-stream/);
     assert.match(stream.response.headers.get('content-security-policy')!, /connect-src 'self'/);
     assert.equal(await stream.next(/retry: (\d+)\n\n/), '3000');
-    assert.equal(ctx.deps.live.count('courses'), 1);
+    assert.equal(ctx.deps.live.count('groceries'), 1);
 
-    // Tony changes something from a page that names itself: Chloé's page hears about it.
-    await tony.fetch(`${COURSES}/_socle/api/fn/add`, {
+    // Bob changes something from a page that names itself: Alice's page hears about it.
+    await bob.fetch(`${GROCERIES}/_socle/api/fn/add`, {
       method: 'POST',
       json: { input: { label: 'Beurre' } },
       headers: { 'x-socle-client': 'tab1' },
     });
     assert.equal(await stream.next(/event: change\ndata: (.*)\n\n/), '{"client":"tab1"}');
     // Reading changes nothing, a refused call neither, and another app's changes are not hers to hear.
-    await call(tony, 'list');
-    await call(tony, 'add', { input: { label: 'interdit' } });
-    await call(tony, 'add', { input: { label: 'x' } }, SECRETS);
+    await call(bob, 'list');
+    await call(bob, 'add', { input: { label: 'forbidden' } });
+    await call(bob, 'add', { input: { label: 'x' } }, SECRETS);
     assert.equal(await stream.next(/event: change/, 150), null);
     assert.ok(await stream.next(/: ping\n\n/), 'kept alive');
     await stream.close();
     await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(ctx.deps.live.count('courses'), 0);
+    assert.equal(ctx.deps.live.count('groceries'), 0);
   });
 
   it('renews the session on the event stream too, and only opens a stream for a GET', async () => {
     // A page left open reconnects its stream before anything else: that request slides the session.
     ctx.deps.db
-      .prepare("UPDATE sessions SET last_seen_at = ? WHERE scope = 'courses'")
+      .prepare("UPDATE sessions SET last_seen_at = ? WHERE scope = 'groceries'")
       .run(new Date(Date.now() - 3 * 3600 * 1000).toISOString());
-    const stream = await events(tony);
+    const stream = await events(bob);
     assert.equal(stream.response.status, 200);
     assert.match(stream.response.headers.getSetCookie().join('\n'), /^__Host-socle_app=[^;]+; Max-Age=2592000;/);
     await stream.close();
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     for (let attempt = 0; attempt < 10; attempt++) {
-      const head = await tony.request(`${COURSES}/_socle/api/events`, {
+      const head = await bob.request(`${GROCERIES}/_socle/api/events`, {
         method: 'HEAD',
         headers: { 'sec-fetch-site': 'same-origin' },
       });
       assert.equal(head.status, 405);
     }
-    assert.equal(ctx.deps.live.count('courses'), 0, 'no stream was opened for them');
+    assert.equal(ctx.deps.live.count('groceries'), 0, 'no stream was opened for them');
   });
 
   it('closes the stream of someone who is no longer signed in, and bounds how many one member holds', async () => {
     const visitor = new Browser(ctx.app);
-    const { family } = signIn(ctx, visitor, CHLOE);
-    await visitor.navigate(`${COURSES}/`);
+    const { family } = signIn(ctx, visitor, ALICE);
+    await visitor.navigate(`${GROCERIES}/`);
     const streams = [];
     for (let index = 0; index < 8; index++) streams.push(await events(visitor));
-    assert.equal(ctx.deps.live.count('courses'), 8);
+    assert.equal(ctx.deps.live.count('groceries'), 8);
     const extra = await events(visitor);
     assert.equal(await extra.next(/retry: (\d+)\n\n/), '60000');
     assert.equal(await extra.next(/closed/), 'closed');
@@ -401,28 +401,28 @@ describe('an app, from its sources to the browser', () => {
 
     ctx.deps.db.prepare('DELETE FROM sessions WHERE family = ?').run(family);
     assert.equal(await streams[0]!.next(/closed/), 'closed');
-    assert.equal(ctx.deps.live.count('courses'), 0);
+    assert.equal(ctx.deps.live.count('groceries'), 0);
     assert.equal((await events(new Browser(ctx.app))).response.status, 401);
-    assert.equal((await tony.fetch(`${COURSES}/_socle/api/events`, { pageOrigin: DEMO })).status, 403);
+    assert.equal((await bob.fetch(`${GROCERIES}/_socle/api/events`, { pageOrigin: DEMO })).status, 403);
   });
 
   it('only replaces the published version when a new one builds and migrates', async () => {
-    const stream = await events(tony);
+    const stream = await events(bob);
     await stream.next(/retry/);
     const page = async () =>
-      /\/assets\/[0-9a-f]{16}/.exec(await (await tony.navigate(`${COURSES}/`)).response.text())![0];
+      /\/assets\/[0-9a-f]{16}/.exec(await (await bob.navigate(`${GROCERIES}/`)).response.text())![0];
     const first = await page();
 
     const broken = await ctx.deps.apps.deploy(
-      'courses',
-      courses({ 'web/main.tsx': 'import x from "left-pad"; export default x;' }),
+      'groceries',
+      groceries({ 'web/main.tsx': 'import x from "left-pad"; export default x;' }),
       null,
     );
     assert.ok(!broken.ok && broken.stage === 'build');
     assert.match(broken.problems[0]!.message, /"left-pad" is not available/);
     const badSql = await ctx.deps.apps.deploy(
-      'courses',
-      courses({ 'migrations/002_more.sql': 'CREATE TABLE items (again)' }),
+      'groceries',
+      groceries({ 'migrations/002_more.sql': 'CREATE TABLE items (again)' }),
       null,
     );
     assert.deepEqual(badSql, {
@@ -433,7 +433,7 @@ describe('an app, from its sources to the browser', () => {
     assert.equal(await page(), first);
     assert.equal(await stream.next(/event: version/, 100), null);
 
-    assert.deepEqual(await ctx.deps.apps.deploy('courses', courses(), null), {
+    assert.deepEqual(await ctx.deps.apps.deploy('groceries', groceries(), null), {
       ok: true,
       versionId: 2,
       unchanged: true,
@@ -441,13 +441,13 @@ describe('an app, from its sources to the browser', () => {
     });
 
     const next = await ctx.deps.apps.deploy(
-      'courses',
-      courses({
-        'app.json': '{ "name": "Courses 2" }',
+      'groceries',
+      groceries({
+        'app.json': '{ "name": "Groceries 2" }',
         'migrations/002_done.sql': 'ALTER TABLE items ADD COLUMN done INTEGER NOT NULL DEFAULT 0;',
         'web/main.tsx': 'export default function App() { return <p className="p-8">v2</p>; }',
       }),
-      { id: tonyId },
+      { id: bobId },
     );
     assert.ok(next.ok && !next.unchanged);
     assert.deepEqual(next.applied, ['002_done.sql']);
@@ -455,10 +455,10 @@ describe('an app, from its sources to the browser', () => {
     assert.ok(await stream.next(/event: version\ndata: \{\}\n\n/));
     const second = await page();
     assert.notEqual(second, first);
-    assert.equal((await tony.request(`${COURSES}${first}/main.js`)).status, 200);
-    assert.match(await (await tony.request(`${COURSES}${second}/style.css`)).text(), /\.p-8\{/);
-    assert.match(await (await tony.navigate(`${COURSES}/`)).response.text(), /<title>Courses 2<\/title>/);
-    assert.ok(((await value(await call(tony, 'list'))) as unknown[]).length >= 3, 'the data is still there');
+    assert.equal((await bob.request(`${GROCERIES}${first}/main.js`)).status, 200);
+    assert.match(await (await bob.request(`${GROCERIES}${second}/style.css`)).text(), /\.p-8\{/);
+    assert.match(await (await bob.navigate(`${GROCERIES}/`)).response.text(), /<title>Groceries 2<\/title>/);
+    assert.ok(((await value(await call(bob, 'list'))) as unknown[]).length >= 3, 'the data is still there');
     await stream.close();
   });
 
@@ -494,37 +494,37 @@ describe('an app, from its sources to the browser', () => {
 
   it('publishes one deployment at a time per app', async () => {
     const version = (label: string) =>
-      courses({
-        'app.json': '{ "name": "Courses 2" }',
+      groceries({
+        'app.json': '{ "name": "Groceries 2" }',
         'migrations/002_done.sql': 'ALTER TABLE items ADD COLUMN done INTEGER NOT NULL DEFAULT 0;',
         'web/main.tsx': `export default function App() { return <p>${label}</p>; }`,
       });
     const outcomes = await Promise.all(
-      ['a', 'b', 'c'].map((label) => ctx.deps.apps.deploy('courses', version(label), null)),
+      ['a', 'b', 'c'].map((label) => ctx.deps.apps.deploy('groceries', version(label), null)),
     );
     const ids = outcomes.map((outcome) => (outcome.ok ? outcome.versionId : 0));
     assert.deepEqual(ids, [ids[0]!, ids[0]! + 1, ids[0]! + 2], 'in the order they were asked');
-    const live = ctx.deps.apps.live('courses')!;
+    const live = ctx.deps.apps.live('groceries')!;
     assert.equal(live.id, ids[2]);
     assert.match(new TextDecoder().decode(live.js), /children:"c"/);
   });
 
   it('has the runner copy each app’s data once a day', async () => {
-    // courses and secrets; the fake demo has no data
+    // groceries and secrets; the fake demo has no data
     assert.deepEqual(await backupApps(ctx.deps, '2027-01-15'), { written: 2, failed: [] });
     assert.deepEqual(await backupApps(ctx.deps, '2027-01-15'), { written: 0, failed: [] });
-    const dir = path.join(ctx.deps.config.dataDir, 'apps', 'courses', 'backups');
+    const dir = path.join(ctx.deps.config.dataDir, 'apps', 'groceries', 'backups');
     assert.deepEqual(readdirSync(dir), ['live-2027-01-15.db']);
     const copy = new DatabaseSync(path.join(dir, 'live-2027-01-15.db'), { readOnly: true });
     assert.ok((copy.prepare('SELECT COUNT(*) AS n FROM items').get() as { n: number }).n >= 3);
     copy.close();
-    for (let day = 16; day <= 31; day++) await ctx.deps.runner.backup('courses/live', `2027-01-${day}`, 14);
+    for (let day = 16; day <= 31; day++) await ctx.deps.runner.backup('groceries/live', `2027-01-${day}`, 14);
     assert.equal(readdirSync(dir).length, 14);
     assert.deepEqual(await ctx.deps.runner.backup('../x/live', '2027-01-15', 14), {
       ok: false,
       message: 'invalid database name: ../x/live',
     });
-    assert.deepEqual(await ctx.deps.runner.backup('courses/live', '../../x', 14), {
+    assert.deepEqual(await ctx.deps.runner.backup('groceries/live', '../../x', 14), {
       ok: false,
       message: 'invalid backup date: ../../x',
     });
@@ -533,11 +533,11 @@ describe('an app, from its sources to the browser', () => {
     // left half-written is not taken for a backup the next time.
     const real = ctx.deps.runner.backup;
     ctx.deps.runner.backup = (database, date, keep) =>
-      database === 'courses/live'
+      database === 'groceries/live'
         ? Promise.reject(new RunnerUnavailable('timeout', 'this took too long and was stopped'))
         : real(database, date, keep);
     try {
-      assert.deepEqual(await backupApps(ctx.deps, '2027-02-01'), { written: 1, failed: ['courses'] });
+      assert.deepEqual(await backupApps(ctx.deps, '2027-02-01'), { written: 1, failed: ['groceries'] });
     } finally {
       ctx.deps.runner.backup = real;
     }
@@ -548,8 +548,8 @@ describe('an app, from its sources to the browser', () => {
   });
 
   it('gives each app its turn at the runner, and refuses a flood instead of queueing it', async () => {
-    // One member's page of "courses" fires a burst of calls that each hold a worker until stopped.
-    const burst = Array.from({ length: 30 }, () => call(tony, 'spin'));
+    // One member's page of "groceries" fires a burst of calls that each hold a worker until stopped.
+    const burst = Array.from({ length: 30 }, () => call(bob, 'spin'));
     let burstOver = false;
     const settled = Promise.all(burst).then((responses) => {
       burstOver = true;
@@ -557,7 +557,7 @@ describe('an app, from its sources to the browser', () => {
     });
     // Meanwhile the other app answers: the stuck one never holds every worker, and the other
     // app's call does not wait behind its line.
-    assert.deepEqual(await value(await call(tony, 'list', {}, SECRETS)), [{ label: 'code du coffre' }, { label: 'x' }]);
+    assert.deepEqual(await value(await call(bob, 'list', {}, SECRETS)), [{ label: 'code du coffre' }, { label: 'x' }]);
     assert.equal(burstOver, false, 'answered while the other app was still stuck');
     const statuses = (await settled).map((response) => response.status);
     // Two run at a time, sixteen wait their turn (and give up when it takes too long), the rest are refused at once.
@@ -566,13 +566,13 @@ describe('an app, from its sources to the browser', () => {
       statuses.every((status) => status === 503 || status === 504),
       JSON.stringify(statuses),
     );
-    assert.ok(await value(await call(tony, 'context')), 'and the app answers again afterwards');
+    assert.ok(await value(await call(bob, 'context')), 'and the app answers again afterwards');
   });
 
   it('gives the runner an app’s code again when the runner lost it', async () => {
-    const outcome = await ctx.deps.apps.deploy('perdu', courses({ 'app.json': '{ "name": "Perdu" }' }), null);
+    const outcome = await ctx.deps.apps.deploy('perdu', groceries({ 'app.json': '{ "name": "Perdu" }' }), null);
     assert.ok(outcome.ok);
-    await tony.navigate('https://perdu.apps.test/');
+    await bob.navigate('https://perdu.apps.test/');
     const version = ctx.deps.apps.live('perdu')!;
     const bundles = path.join(ctx.deps.config.dataDir, 'apps', 'perdu', 'bundles');
     assert.deepEqual(readdirSync(bundles), [`${version.bundleHash}.js`]);
@@ -589,7 +589,7 @@ describe('an app, from its sources to the browser', () => {
       today: '',
     });
     assert.ok(!direct.ok && direct.error.code === 'bundle_missing');
-    assert.deepEqual(await value(await call(tony, 'list', {}, 'https://perdu.apps.test')), []);
+    assert.deepEqual(await value(await call(bob, 'list', {}, 'https://perdu.apps.test')), []);
     assert.deepEqual(readdirSync(bundles), [`${version.bundleHash}.js`], 'the web side sent it again');
   });
 
@@ -597,10 +597,10 @@ describe('an app, from its sources to the browser', () => {
     const real = ctx.deps.runner.call;
     ctx.deps.runner.call = () => Promise.reject(new RunnerUnavailable('unreachable', 'the runner is not reachable'));
     try {
-      const response = await call(tony, 'list');
+      const response = await call(bob, 'list');
       assert.equal(response.status, 503);
       assert.equal(((await response.json()) as { error: string }).error, 'unavailable');
-      assert.equal((await tony.fetch(`${COURSES}/_socle/api/me`)).status, 200);
+      assert.equal((await bob.fetch(`${GROCERIES}/_socle/api/me`)).status, 200);
     } finally {
       ctx.deps.runner.call = real;
     }
@@ -610,46 +610,75 @@ describe('an app, from its sources to the browser', () => {
     ctx.deps.vendor = new VendorCache(ctx.deps.runner);
     const anonymous = new Browser(ctx.app);
     for (const file of ['react.js', 'react-dom.js', 'react-jsx-runtime.js', 'sdk.js', 'ui.js', 'ui.css']) {
-      const response = await anonymous.request(`${COURSES}/_socle/vendor/${file}`);
+      const response = await anonymous.request(`${GROCERIES}/_socle/vendor/${file}`);
       assert.equal(response.status, 200, file);
       assert.equal(response.headers.get('cache-control'), 'no-cache');
       const etag = response.headers.get('etag')!;
       assert.match(etag, /^"[0-9a-f]{20}"$/);
-      const again = await anonymous.request(`${COURSES}/_socle/vendor/${file}`, { headers: { 'if-none-match': etag } });
+      const again = await anonymous.request(`${GROCERIES}/_socle/vendor/${file}`, {
+        headers: { 'if-none-match': etag },
+      });
       assert.equal(again.status, 304);
       assert.equal(await again.text(), '');
     }
-    const ui = await (await anonymous.request(`${COURSES}/_socle/vendor/ui.js`)).text();
+    const ui = await (await anonymous.request(`${GROCERIES}/_socle/vendor/ui.js`)).text();
     assert.match(ui, /from"\/_socle\/vendor\/react\.js"/);
     assert.match(ui, /from"\/_socle\/vendor\/sdk\.js"/);
-    const css = await (await anonymous.request(`${COURSES}/_socle/vendor/ui.css`)).text();
+    const css = await (await anonymous.request(`${GROCERIES}/_socle/vendor/ui.css`)).text();
     assert.match(css, /--socle-bg:/);
     assert.match(css, /box-sizing/);
-    assert.equal((await tony.request(`${COURSES}/_socle/vendor/../../package.json`)).status, 404);
-    assert.equal((await tony.request(`${COURSES}/_socle/vendor/nope.js`)).status, 404);
+    assert.equal((await bob.request(`${GROCERIES}/_socle/vendor/../../package.json`)).status, 404);
+    assert.equal((await bob.request(`${GROCERIES}/_socle/vendor/nope.js`)).status, 404);
   });
 
   it('ships a demo app that goes through the same build and sandbox', async () => {
     const outcome = await syncDemoApp(ctx.deps.db, ctx.deps.apps, true);
     assert.ok(outcome?.ok, JSON.stringify(outcome));
     assert.deepEqual(outcome.applied, ['001_init.sql']);
-    await tony.navigate(`${DEMO}/`);
+    await bob.navigate(`${DEMO}/`);
     ctx.push.sent.length = 0;
-    const added = await value(await call(tony, 'add', { input: { label: '  Du pain ' } }, DEMO));
+    const added = await value(await call(bob, 'add', { input: { label: '  Du pain ' } }, DEMO));
     assert.deepEqual(added, { id: 1 });
-    assert.deepEqual(await value(await call(tony, 'list', { query: true }, DEMO)), [
-      { id: 1, label: 'Du pain', done: 0, author: tonyId },
+    assert.deepEqual(await value(await call(bob, 'list', { query: true }, DEMO)), [
+      { id: 1, label: 'Du pain', done: 0, author: bobId },
     ]);
-    assert.equal(await value(await call(tony, 'toggle', { input: { id: 1 } }, DEMO)), 1);
-    assert.equal((await call(tony, 'add', { input: { label: '   ' } }, DEMO)).status, 422);
-    assert.equal(await value(await call(tony, 'remove', { input: { id: 1 } }, DEMO)), 1);
+    assert.equal(await value(await call(bob, 'toggle', { input: { id: 1 } }, DEMO)), 1);
+    assert.equal((await call(bob, 'add', { input: { label: '   ' } }, DEMO)).status, 422);
+    assert.equal(await value(await call(bob, 'remove', { input: { id: 1 } }, DEMO)), 1);
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(
       ctx.push.sent.map((sent) => [sent.userId, sent.app, sent.message.title]),
-      [[chloeId, DEMO_SLUG, 'tony a ajouté « Du pain »']],
+      [[aliceId, DEMO_SLUG, 'bob added “Du pain”']],
     );
     // Turning the demo off removes the app; its sources come back with the next start.
     assert.equal(await syncDemoApp(ctx.deps.db, ctx.deps.apps, false), null);
-    assert.equal((await tony.navigate(`${DEMO}/`)).response.status, 404);
+    assert.equal((await bob.navigate(`${DEMO}/`)).response.status, 404);
+  });
+});
+
+describe('an instance set to another language', () => {
+  it('speaks it on its own pages, and tells the apps which one it is', async () => {
+    const ctx = setup({ limits: TEST_LIMITS, env: { APP_LOCALE: 'fr' } });
+    try {
+      const anonymous = new Browser(ctx.app);
+      assert.match(await (await anonymous.request(`${CONTROL}/`)).text(), /<html lang="fr">[\s\S]*Se connecter/);
+      const outcome = await syncDemoApp(ctx.deps.db, ctx.deps.apps, true, 'fr');
+      assert.ok(outcome?.ok, JSON.stringify(outcome));
+      const bob = new Browser(ctx.app);
+      signIn(ctx, bob, BOB);
+      const page = await (await bob.navigate(`${DEMO}/`)).response.text();
+      assert.match(page, /<html lang="fr">/);
+      assert.match(page, /<title>Démo<\/title>/);
+      assert.match(page, /"locale":"fr"/);
+      // The demo's server functions answer in the language their context names.
+      const refused = await bob.fetch(`${DEMO}/_socle/api/fn/add`, {
+        method: 'POST',
+        json: { input: { label: '   ' } },
+      });
+      assert.equal(refused.status, 422);
+      assert.equal(((await refused.json()) as { message: string }).message, 'Écrivez quelque chose à ajouter.');
+    } finally {
+      ctx.cleanup();
+    }
   });
 });

@@ -1,5 +1,6 @@
 import { html, raw } from 'hono/html';
 import type { AppRow } from '../apps/registry.ts';
+import type { Translate } from '../i18n.ts';
 
 /** What the platform tells the app's code about who is looking at it (read by @socle/sdk). */
 export interface BootData {
@@ -7,6 +8,8 @@ export interface BootData {
   app: { slug: string; name: string };
   members: { id: number; name: string }[];
   push: { publicKey: string };
+  /** Language of the platform's own words (the kit's components follow it). */
+  locale: string;
 }
 
 const VENDOR = '/_socle/vendor';
@@ -27,9 +30,9 @@ function embeddedJson(value: unknown): string {
  * the same way and no inline script is ever needed. The boot data is a JSON block:
  * browsers do not execute it, the SDK reads it.
  */
-export function shellPage(app: AppRow, assetHash: string, boot: BootData) {
+export function shellPage(app: AppRow, assetHash: string, boot: BootData, t: Translate) {
   return html`<!doctype html>
-    <html lang="fr">
+    <html lang="${boot.locale}">
       <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -51,7 +54,7 @@ export function shellPage(app: AppRow, assetHash: string, boot: BootData) {
       </head>
       <body>
         <div id="root"></div>
-        <noscript>${app.name} a besoin de JavaScript pour fonctionner.</noscript>
+        <noscript>${t('{name} needs JavaScript to work.', { name: app.name })}</noscript>
         <script id="socle-boot" type="application/json">
           ${raw(embeddedJson(boot))}
         </script>

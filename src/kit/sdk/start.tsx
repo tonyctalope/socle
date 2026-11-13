@@ -1,6 +1,20 @@
 import { Component, type ComponentType, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { words } from './boot.ts';
 import { listen } from './data.ts';
+
+const TEXT = words({
+  en: {
+    title: 'Something went wrong',
+    body: 'The app ran into an error. Reloading the page is often enough.',
+    reload: 'Reload',
+  },
+  fr: {
+    title: 'Un problème est survenu',
+    body: 'L’appli a rencontré une erreur. Recharger la page suffit souvent.',
+    reload: 'Recharger',
+  },
+});
 
 /** Shown instead of a blank page when the app's code throws while rendering. */
 class ErrorScreen extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -15,8 +29,8 @@ class ErrorScreen extends Component<{ children: ReactNode }, { error: Error | nu
     if (!error) return this.props.children;
     return (
       <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-4 p-6">
-        <h1 className="text-xl font-semibold">Un problème est survenu</h1>
-        <p className="text-muted">L’appli a rencontré une erreur. Recharger la page suffit souvent.</p>
+        <h1 className="text-xl font-semibold">{TEXT.title}</h1>
+        <p className="text-muted">{TEXT.body}</p>
         <pre className="overflow-auto rounded-xl border border-line bg-card p-3 text-xs text-muted">
           {error.message}
         </pre>
@@ -25,7 +39,7 @@ class ErrorScreen extends Component<{ children: ReactNode }, { error: Error | nu
           className="rounded-xl bg-accent px-4 py-3 font-medium text-accent-ink"
           onClick={() => location.reload()}
         >
-          Recharger
+          {TEXT.reload}
         </button>
       </main>
     );

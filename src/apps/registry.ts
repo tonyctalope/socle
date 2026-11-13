@@ -23,7 +23,7 @@ export function listApps(db: Db): AppRow[] {
 }
 
 /**
- * Who may open an app. Every signed-in household member for now; per-app access
+ * Who may open an app. Every signed-in member for now; per-app access
  * lists arrive with app creation, and this is the single place they will be read.
  */
 export function canAccess(_user: UserRow, _app: AppRow): boolean {

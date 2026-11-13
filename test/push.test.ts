@@ -3,13 +3,13 @@ import { describe, it } from 'node:test';
 import { WebPushError } from 'web-push';
 import { all, get } from '../src/db/database.ts';
 import { createPushService, saveSubscription } from '../src/push/push.ts';
-import { Browser, DEMO, NOTES, setup, signIn, subscription, TONY } from './helpers.ts';
+import { Browser, DEMO, NOTES, setup, signIn, subscription, BOB } from './helpers.ts';
 
 describe('push subscriptions', () => {
   it('belong to one user on one app', async () => {
     const ctx = setup();
     const browser = new Browser(ctx.app);
-    const { userId } = signIn(ctx, browser, TONY);
+    const { userId } = signIn(ctx, browser, BOB);
     await browser.navigate(`${DEMO}/`);
     await browser.navigate(`${NOTES}/`);
 
@@ -43,7 +43,7 @@ describe('push subscriptions', () => {
   it('refuses endpoints that are not a browser push service, and malformed bodies', async () => {
     const ctx = setup();
     const browser = new Browser(ctx.app);
-    signIn(ctx, browser, TONY);
+    signIn(ctx, browser, BOB);
     await browser.navigate(`${DEMO}/`);
     const url = `${DEMO}/_socle/api/push/subscriptions`;
     const post = (json: unknown) => browser.fetch(url, { method: 'POST', json });
@@ -67,7 +67,7 @@ describe('push subscriptions', () => {
   it('keeps at most ten devices per member and app, and limits how fast they are added', async () => {
     const ctx = setup();
     const browser = new Browser(ctx.app);
-    const { userId } = signIn(ctx, browser, TONY);
+    const { userId } = signIn(ctx, browser, BOB);
     await browser.navigate(`${DEMO}/`);
     const url = `${DEMO}/_socle/api/push/subscriptions`;
     const sent = [];
@@ -99,7 +99,7 @@ describe('push subscriptions', () => {
     const phone = new Browser(ctx.app);
     const laptop = new Browser(ctx.app);
     for (const browser of [phone, laptop]) {
-      signIn(ctx, browser, TONY);
+      signIn(ctx, browser, BOB);
       await browser.navigate(`${DEMO}/`);
       await browser.navigate(`${NOTES}/`);
       for (const origin of [DEMO, NOTES]) {
@@ -120,7 +120,7 @@ describe('push subscriptions', () => {
   it('limits test notifications', async () => {
     const ctx = setup();
     const browser = new Browser(ctx.app);
-    signIn(ctx, browser, TONY);
+    signIn(ctx, browser, BOB);
     await browser.navigate(`${DEMO}/`);
     const statuses = [];
     for (let i = 0; i < 12; i++) {
@@ -134,7 +134,7 @@ describe('push subscriptions', () => {
 describe('push delivery', () => {
   it('sends to the devices of that user for that app, and forgets dead subscriptions', async () => {
     const ctx = setup();
-    const { userId } = signIn(ctx, new Browser(ctx.app), TONY);
+    const { userId } = signIn(ctx, new Browser(ctx.app), BOB);
     const alive = subscription();
     const gone = subscription();
     const elsewhere = subscription();

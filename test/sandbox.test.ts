@@ -12,8 +12,8 @@ import { callFunction, describeBundle, type CallRequest, type CallResult } from 
 // would send, builds it as the platform does, and calls it in a real sandbox.
 
 const LIMITS: Limits = { ...DEFAULT_LIMITS, callMs: 400, guestMemory: 32 * 1024 * 1024 };
-const TONY = { id: 1, name: 'Tony' };
-const CHLOE = { id: 2, name: 'Chloé' };
+const BOB = { id: 1, name: 'Bob' };
+const ALICE = { id: 2, name: 'Alice' };
 
 const dir = mkdtempSync(path.join(tmpdir(), 'socle-sandbox-'));
 const databases = new AppDatabases(dir, LIMITS);
@@ -48,8 +48,8 @@ async function app(name: string, source: string, migrations: Record<string, stri
         bundle,
         fn,
         input,
-        user: TONY,
-        members: [TONY, CHLOE],
+        user: BOB,
+        members: [BOB, ALICE],
         now: 1_800_000_000_000,
         today: '2027-01-15',
         ...overrides,
@@ -113,8 +113,8 @@ describe('server functions', () => {
     assert.deepEqual(value(await notes.call('byId', { id: 1 })), { body: 'Pain' });
     assert.equal(value(await notes.call('byId', { id: 99 })), null);
     assert.deepEqual(value(await notes.call('who')), {
-      user: TONY,
-      members: [TONY, CHLOE],
+      user: BOB,
+      members: [BOB, ALICE],
       now: 1_800_000_000_000,
       today: '2027-01-15',
     });
@@ -183,9 +183,9 @@ describe('server functions', () => {
         import { mutation, query, v } from '@socle/server';
         import { MAX } from '../shared/limits';
         export const addExpense = mutation({
-          tool: 'Ajoute une dépense au compte commun.',
+          tool: 'Adds an expense to the shared account.',
           input: v.object({
-            label: v.string().min(1).max(MAX).describe('Ce qui a été acheté'),
+            label: v.string().min(1).max(MAX).describe('What was bought'),
             cents: v.int().min(1),
             day: v.string().date().optional(),
             split: v.array(v.int()).max(10).optional(),
@@ -201,13 +201,13 @@ describe('server functions', () => {
       {
         name: 'addExpense',
         kind: 'mutation',
-        tool: 'Ajoute une dépense au compte commun.',
+        tool: 'Adds an expense to the shared account.',
         input: {
           type: 'object',
           additionalProperties: false,
           required: ['label', 'cents', 'kind'],
           properties: {
-            label: { type: 'string', minLength: 1, maxLength: 80, description: 'Ce qui a été acheté' },
+            label: { type: 'string', minLength: 1, maxLength: 80, description: 'What was bought' },
             cents: { type: 'integer', minimum: 1 },
             day: { type: 'string', format: 'date' },
             split: { type: 'array', items: { type: 'integer' }, maxItems: 10 },
@@ -240,7 +240,7 @@ describe('server functions', () => {
       'notify',
       `
       export const ping = mutation(({ notify, user }) => {
-        notify('others', { title: user.name + ' a ajouté une note', body: 'Pain', url: '/notes/1' });
+        notify('others', { title: user.name + ' added a note', body: 'Pain', url: '/notes/1' });
         notify(2, { title: 'Pour toi' });
         notify([1, 2], { title: 'Ailleurs', url: 'https://evil.example/' });
         notify(1, { title: 'Ailleurs aussi', url: '//evil.example/x' });
@@ -253,7 +253,7 @@ describe('server functions', () => {
     );
     const ping = await notes.call('ping');
     assert.deepEqual(ping.ok && ping.effects, [
-      { type: 'notify', to: 'others', title: 'Tony a ajouté une note', body: 'Pain', url: '/notes/1' },
+      { type: 'notify', to: 'others', title: 'Bob added a note', body: 'Pain', url: '/notes/1' },
       { type: 'notify', to: [2], title: 'Pour toi', body: '', url: '/' },
       { type: 'notify', to: [1, 2], title: 'Ailleurs', body: '', url: '/' }, // only paths of the app
       { type: 'notify', to: [1], title: 'Ailleurs aussi', body: '', url: '/' },
@@ -477,7 +477,7 @@ describe('what an app cannot do with its database', () => {
         database: 'quota/live',
         bundle: built!.code,
         input: null,
-        user: TONY,
+        user: BOB,
         members: [],
         now: 0,
         today: '',
@@ -545,7 +545,7 @@ describe('what an app cannot do with the machine', () => {
     }
     refused(await notes.call('never'), 'error', /never settles/);
     assert.equal(value(await notes.call('count')), 0, 'the write of the stopped mutation was rolled back');
-    assert.deepEqual(value(await notes.call('add', { body: 'après' })), { changes: 1, lastInsertRowid: 1 });
+    assert.deepEqual(value(await notes.call('add', { body: 'after' })), { changes: 1, lastInsertRowid: 1 });
   });
 
   it('is stopped when the file itself loops while loading', async () => {
@@ -567,7 +567,7 @@ describe('what an app cannot do with the machine', () => {
     `,
     );
     for (const fn of ['array', 'text', 'buffer', 'viaSql']) refused(await notes.call(fn), /^(memory|error|timeout)$/);
-    assert.deepEqual(value(await notes.call('add', { body: 'après' })), { changes: 1, lastInsertRowid: 1 });
+    assert.deepEqual(value(await notes.call('add', { body: 'after' })), { changes: 1, lastInsertRowid: 1 });
   });
 
   it('cannot hold more memory than a call is given, however it asks', async () => {
@@ -671,7 +671,7 @@ describe('what an app cannot do with the machine', () => {
       refused(await notes.call(fn), /^(stack_overflow|error|memory)$/);
     }
     assert.equal(value(await notes.call('fine')), 500);
-    assert.deepEqual(value(await notes.call('add', { body: 'après' })), { changes: 1, lastInsertRowid: 1 });
+    assert.deepEqual(value(await notes.call('add', { body: 'after' })), { changes: 1, lastInsertRowid: 1 });
   });
 
   it('starts from nothing at every call', async () => {
@@ -861,7 +861,7 @@ describe('migrations', () => {
           CREATE INDEX tasks_owner ON tasks(owner);
           CREATE VIEW open_tasks AS SELECT * FROM tasks WHERE done = 0;
           CREATE TRIGGER tasks_touch AFTER UPDATE ON tasks BEGIN UPDATE people SET name = name WHERE id = NEW.owner; END;
-          INSERT INTO people (name) VALUES ('Tony'), ('Chloé');
+          INSERT INTO people (name) VALUES ('Bob'), ('Alice');
           INSERT INTO tasks (title, owner) VALUES ('Poubelles', 1);`,
         '002.sql': `
           ALTER TABLE tasks ADD COLUMN due TEXT;
@@ -882,7 +882,7 @@ describe('migrations', () => {
     `,
       {},
     );
-    assert.deepEqual(value(await call('open')), [{ label: 'Poubelles', owner: 'Tony' }]);
+    assert.deepEqual(value(await call('open')), [{ label: 'Poubelles', owner: 'Bob' }]);
     assert.equal(value(await call('finish', { id: 1 })), 1);
     refused(await call('orphan'), 'error', /FOREIGN KEY/);
   });

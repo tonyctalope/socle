@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { Browser, CONTROL, DEMO, NOTES, setup, signIn, subscription, TONY } from './helpers.ts';
+import { Browser, CONTROL, DEMO, NOTES, setup, signIn, subscription, BOB } from './helpers.ts';
 
 // Apps are sibling subdomains of one another and of the control plane. Browsers
 // treat siblings as the same site, so SameSite cookies do not separate them:
@@ -9,7 +9,7 @@ import { Browser, CONTROL, DEMO, NOTES, setup, signIn, subscription, TONY } from
 async function signedIn() {
   const ctx = setup();
   const browser = new Browser(ctx.app);
-  signIn(ctx, browser, TONY);
+  signIn(ctx, browser, BOB);
   await browser.navigate(`${DEMO}/`);
   await browser.navigate(`${NOTES}/`);
   return { ctx, browser };
@@ -148,7 +148,7 @@ describe('what is reachable without signing in', () => {
       scope: string;
       icons: unknown[];
     };
-    assert.equal(manifest.name, 'Démo');
+    assert.equal(manifest.name, 'Demo');
     assert.equal(manifest.scope, '/');
     assert.equal(manifest.icons.length, 4);
 
@@ -190,7 +190,7 @@ describe('what is reachable without signing in', () => {
     // An app without a published version shows a message instead of an empty shell.
     const empty = await browser.navigate(`${NOTES}/`);
     assert.equal(empty.response.status, 404);
-    assert.match(await empty.response.text(), /pas encore de version publiée/);
+    assert.match(await empty.response.text(), /no published version yet/);
     ctx.cleanup();
   });
 });

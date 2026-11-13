@@ -4,4 +4,5 @@ export { api, refreshAll, useQuery, type QueryState } from './data.ts';
 export { ApiError } from './http.ts';
 export { install, logout, push, useMe, usePush, type PushState } from './platform.ts';
 export { start } from './start.tsx';
+export { locale, words } from './boot.ts';
 export type { Member } from './boot.ts';

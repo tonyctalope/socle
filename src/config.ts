@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { isValidSlug } from './apps/slug.ts';
+import { isLocale, LOCALES, type Locale } from './i18n.ts';
 
 export interface Config {
   /** Origin of the control plane (sign-in, SSO), e.g. https://socle.example.com (no trailing slash). */
@@ -13,7 +14,8 @@ export interface Config {
   port: number;
   host: string;
   dataDir: string;
-  google: { clientId: string; clientSecret: string; issuer: string };
+  /** The OpenID Connect provider members sign in with. `name` is what the sign-in button calls it. */
+  oidc: { issuer: string; clientId: string; clientSecret: string; name: string | null };
   allowedEmails: ReadonlySet<string>;
   vapid: { publicKey: string | null; privateKey: string | null; subject: string };
   /** Serves the built-in demo app on demo.<appsDomain>. */
@@ -23,8 +25,10 @@ export interface Config {
   secureCookies: boolean;
   /** Unix socket of the runner (a separate container). Null: the runner's workers are started by this process. */
   runnerSocket: string | null;
-  /** Where the household lives: "today" for an app's server functions. */
+  /** Where the members live: "today" for an app's server functions. */
   timezone: string;
+  /** Language of the platform's own pages and messages. */
+  locale: Locale;
 }
 
 export class ConfigError extends Error {}
@@ -87,10 +91,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new ConfigError('DEV_LOGIN is only allowed with NODE_ENV=development and a localhost CONTROL_URL');
   }
 
-  const clientId = env.GOOGLE_CLIENT_ID ?? '';
-  const clientSecret = env.GOOGLE_CLIENT_SECRET ?? '';
-  if (!devLogin && (!clientId || !clientSecret)) {
-    throw new ConfigError('GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are required');
+  const issuer = env.OIDC_ISSUER ?? '';
+  const clientId = env.OIDC_CLIENT_ID ?? '';
+  const clientSecret = env.OIDC_CLIENT_SECRET ?? '';
+  if (!devLogin && (!issuer || !clientId || !clientSecret)) {
+    throw new ConfigError('OIDC_ISSUER, OIDC_CLIENT_ID and OIDC_CLIENT_SECRET are required');
+  }
+  if (issuer) {
+    let parsed: URL | null = null;
+    try {
+      parsed = new URL(issuer);
+    } catch {
+      // reported below
+    }
+    if (
+      !parsed ||
+      (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLoopbackHost(parsed.hostname)))
+    ) {
+      throw new ConfigError(`OIDC_ISSUER must be an https:// URL: ${issuer}`);
+    }
   }
 
   const vapidPublic = env.VAPID_PUBLIC_KEY || null;
@@ -113,12 +132,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       'RUNNER_SOCKET is required in production: the runner is a separate container (see compose.yaml)',
     );
   }
-  const timezone = env.APP_TIMEZONE || 'Europe/Paris';
+  const timezone = env.APP_TIMEZONE || 'UTC';
   try {
     new Intl.DateTimeFormat('en-CA', { timeZone: timezone });
   } catch {
     throw new ConfigError(`APP_TIMEZONE is not a known timezone: ${timezone}`);
   }
+  const locale = (env.APP_LOCALE || 'en').toLowerCase();
+  if (!isLocale(locale)) throw new ConfigError(`APP_LOCALE must be one of: ${LOCALES.join(', ')}`);
 
   return {
     controlOrigin: url.origin,
@@ -129,7 +150,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // With DEV_LOGIN anyone who reaches the port can sign in: stay on this machine by default.
     host: env.HOST || (devLogin ? '127.0.0.1' : '0.0.0.0'),
     dataDir: path.resolve(env.DATA_DIR || 'data'),
-    google: { clientId, clientSecret, issuer: env.GOOGLE_ISSUER || 'https://accounts.google.com' },
+    oidc: { issuer, clientId, clientSecret, name: env.OIDC_NAME?.trim() || null },
     allowedEmails,
     vapid: { publicKey: vapidPublic, privateKey: vapidPrivate, subject: vapidSubject },
     demoApp: flag(env.DEMO_APP),
@@ -137,6 +158,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     secureCookies: secure,
     runnerSocket,
     timezone,
+    locale,
   };
 }
 
@@ -153,7 +175,7 @@ export function appSlugFromHost(config: Config, host: string): string | null {
   return isValidSlug(slug) ? slug : null;
 }
 
-/** The calendar date (YYYY-MM-DD) where the household lives. */
+/** The calendar date (YYYY-MM-DD) where the members live. */
 export function localDate(config: Config, date: Date): string {
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: config.timezone,

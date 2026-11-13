@@ -58,5 +58,5 @@ export function securityHeaders(config: Config, pageCsp: string): MiddlewareHand
 
 export function onError(error: Error, c: Context): Response {
   console.error('unhandled error:', error);
-  return c.text('Erreur interne', 500);
+  return c.text('Internal error', 500);
 }

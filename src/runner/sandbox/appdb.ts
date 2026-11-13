@@ -13,7 +13,7 @@ import type { Limits } from '../limits.ts';
 
 const C = constants;
 
-/** "<app>/<name>", e.g. "tricount/live". Nothing else ever becomes part of a path. */
+/** "<app>/<name>", e.g. "notes/live". Nothing else ever becomes part of a path. */
 const DATABASE_NAME = /^[a-z][a-z0-9-]{0,31}\/[a-z][a-z0-9-]{0,15}$/;
 
 /** Tables the platform keeps inside an app's database, hidden from the app. */

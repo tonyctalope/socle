@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
-import { boot } from './boot.ts';
+import { boot, words } from './boot.ts';
 import { request } from './http.ts';
+
+const TEXT = words({ en: { failed: 'Something went wrong.' }, fr: { failed: 'Une erreur est survenue.' } });
 
 // What every app gets from the platform besides its own functions: who is signed
 // in, signing out, the home-screen install state and notifications.
@@ -129,7 +131,7 @@ export function usePush(): {
     try {
       return await action();
     } catch (failure) {
-      setError((failure as Error).message || 'Une erreur est survenue.');
+      setError((failure as Error).message || TEXT.failed);
       return undefined;
     } finally {
       setBusy(false);

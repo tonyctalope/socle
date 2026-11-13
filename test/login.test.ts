@@ -4,26 +4,26 @@ import { after, before, describe, it } from 'node:test';
 import { serve, type ServerType } from '@hono/node-server';
 import { Hono } from 'hono';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
-import { createGoogleProvider } from '../src/auth/google.ts';
+import { createOidcProvider } from '../src/auth/oidc.ts';
 import { all, get } from '../src/db/database.ts';
 import {
   Browser,
-  CHLOE,
+  ALICE,
   CONTROL,
   DEMO,
   NOTES,
   setup,
   STRANGER,
   subscription,
-  TONY,
+  BOB,
   type TestContext,
 } from './helpers.ts';
 
-// A fake Google: OIDC discovery, an /authorize that immediately redirects back
+// A fake provider: OIDC discovery, an /authorize that immediately redirects back
 // with a code, a token endpoint returning an RS256-signed ID token, and JWKS.
 // The platform talks to it with the real openid-client.
 
-const CLIENT_ID = 'google-client';
+const CLIENT_ID = 'socle-client';
 
 async function freePort(): Promise<number> {
   const probe = createServer();
@@ -40,10 +40,10 @@ interface Pending {
   challenge: string;
 }
 
-describe('Google sign-in (OIDC) and the e-mail allowlist', () => {
+describe('Sign-in with an OpenID Connect provider and the e-mail allowlist', () => {
   let issuer: string;
   let server: ServerType;
-  let nextIdentity = { email: TONY, verified: true };
+  let nextIdentity = { email: BOB, verified: true };
   const codes = new Map<string, Pending>();
 
   before(async () => {
@@ -51,8 +51,8 @@ describe('Google sign-in (OIDC) and the e-mail allowlist', () => {
     const jwk = { ...(await exportJWK(publicKey)), kid: 'k1', alg: 'RS256', use: 'sig' };
     const port = await freePort();
     issuer = `http://127.0.0.1:${port}`;
-    const google = new Hono();
-    google.get('/.well-known/openid-configuration', (c) =>
+    const provider = new Hono();
+    provider.get('/.well-known/openid-configuration', (c) =>
       c.json({
         issuer,
         authorization_endpoint: `${issuer}/authorize`,
@@ -64,14 +64,14 @@ describe('Google sign-in (OIDC) and the e-mail allowlist', () => {
         code_challenge_methods_supported: ['S256'],
       }),
     );
-    google.get('/jwks', (c) => c.json({ keys: [jwk] }));
-    google.get('/authorize', (c) => {
+    provider.get('/jwks', (c) => c.json({ keys: [jwk] }));
+    provider.get('/authorize', (c) => {
       const q = c.req.query();
       const code = `code-${codes.size + 1}-${Date.now()}`;
       codes.set(code, { nonce: q.nonce!, challenge: q.code_challenge!, ...nextIdentity });
       return c.redirect(`${q.redirect_uri}?code=${code}&state=${encodeURIComponent(q.state!)}`, 302);
     });
-    google.post('/token', async (c) => {
+    provider.post('/token', async (c) => {
       const form = await c.req.parseBody();
       const pending = codes.get(String(form.code));
       codes.delete(String(form.code));
@@ -90,29 +90,29 @@ describe('Google sign-in (OIDC) and the e-mail allowlist', () => {
         .setProtectedHeader({ alg: 'RS256', kid: 'k1' })
         .setIssuer(issuer)
         .setAudience(CLIENT_ID)
-        .setSubject(`google-${pending.email}`)
+        .setSubject(`sub-${pending.email}`)
         .setIssuedAt()
         .setExpirationTime('5m')
         .sign(privateKey);
-      return c.json({ access_token: 'google-at', token_type: 'Bearer', expires_in: 300, id_token: idToken });
+      return c.json({ access_token: 'provider-at', token_type: 'Bearer', expires_in: 300, id_token: idToken });
     });
-    server = serve({ fetch: google.fetch, port, hostname: '127.0.0.1' });
+    server = serve({ fetch: provider.fetch, port, hostname: '127.0.0.1' });
   });
 
   after(() => new Promise<void>((resolve) => server.close(() => resolve())));
 
   function start(): { ctx: TestContext; browser: Browser } {
-    const ctx = setup({ env: { GOOGLE_ISSUER: issuer } });
+    const ctx = setup({ env: { OIDC_ISSUER: issuer } });
     // Routes read deps.identity per request, so swapping it in is enough.
-    ctx.deps.identity = createGoogleProvider(ctx.deps.config, { allowInsecure: true });
+    ctx.deps.identity = createOidcProvider(ctx.deps.config, { allowInsecure: true });
     const browser = new Browser(ctx.app);
     browser.external.push(issuer);
     return { ctx, browser };
   }
 
-  it('takes an anonymous visitor from an app page to Google and back to that page, signed in', async () => {
+  it('takes an anonymous visitor from an app page to the provider and back to that page, signed in', async () => {
     const { ctx, browser } = start();
-    nextIdentity = { email: TONY, verified: true };
+    nextIdentity = { email: BOB, verified: true };
     const { response, url, hops } = await browser.navigate(`${DEMO}/depenses?mois=11`);
     assert.equal(response.status, 200);
     assert.equal(url, `${DEMO}/depenses?mois=11`);
@@ -122,17 +122,17 @@ describe('Google sign-in (OIDC) and the e-mail allowlist', () => {
         `${DEMO}/depenses`,
         `${DEMO}/_socle/login`,
         `${CONTROL}/sso/start`,
-        `${CONTROL}/auth/google/start`,
+        `${CONTROL}/auth/start`,
         `${issuer}/authorize`,
-        `${CONTROL}/auth/google/callback`,
+        `${CONTROL}/auth/callback`,
         `${CONTROL}/sso/start`,
         `${DEMO}/_socle/sso`,
         `${DEMO}/depenses`,
       ],
     );
-    const atGoogle = new URL(hops[4]!);
-    assert.equal(atGoogle.searchParams.get('redirect_uri'), `${CONTROL}/auth/google/callback`);
-    assert.equal(atGoogle.searchParams.get('code_challenge_method'), 'S256');
+    const atProvider = new URL(hops[4]!);
+    assert.equal(atProvider.searchParams.get('redirect_uri'), `${CONTROL}/auth/callback`);
+    assert.equal(atProvider.searchParams.get('code_challenge_method'), 'S256');
 
     const session = browser.setCookies.find((cookie) => cookie.startsWith('__Host-socle_session='))!;
     assert.match(session, /HttpOnly/i);
@@ -142,9 +142,9 @@ describe('Google sign-in (OIDC) and the e-mail allowlist', () => {
     assert.equal(browser.cookie(CONTROL, '__Host-socle_login'), undefined); // one-shot login cookie cleared
 
     const me = (await (await browser.fetch(`${DEMO}/_socle/api/me`)).json()) as { user: { name: string } };
-    assert.equal(me.user.name, 'tony');
+    assert.equal(me.user.name, 'bob');
     // The home page now greets them and lists the apps.
-    assert.match(await (await browser.request(`${CONTROL}/`)).text(), /Bonjour tony/);
+    assert.match(await (await browser.request(`${CONTROL}/`)).text(), /Hello bob/);
     ctx.cleanup();
   });
 
@@ -153,13 +153,13 @@ describe('Google sign-in (OIDC) and the e-mail allowlist', () => {
     nextIdentity = { email: STRANGER, verified: true };
     const stranger = await browser.navigate(`${DEMO}/`);
     assert.equal(stranger.response.status, 403);
-    assert.equal(new URL(stranger.url).pathname, '/auth/google/callback');
+    assert.equal(new URL(stranger.url).pathname, '/auth/callback');
     assert.match(await stranger.response.text(), new RegExp(STRANGER));
     assert.equal(browser.cookie(CONTROL, '__Host-socle_session'), undefined);
     assert.equal(browser.cookie(DEMO, '__Host-socle_app'), undefined);
 
-    nextIdentity = { email: CHLOE, verified: false };
-    assert.equal((await browser.navigate(`${CONTROL}/auth/google/start`)).response.status, 403);
+    nextIdentity = { email: ALICE, verified: false };
+    assert.equal((await browser.navigate(`${CONTROL}/auth/start`)).response.status, 403);
     ctx.cleanup();
   });
 
@@ -180,20 +180,20 @@ describe('Google sign-in (OIDC) and the e-mail allowlist', () => {
     ]);
     // Thousands of abandoned attempts from many addresses…
     for (let i = 0; i < 6000; i++) {
-      const abandoned = await ctx.app.request(`${CONTROL}/auth/google/start`, {
+      const abandoned = await ctx.app.request(`${CONTROL}/auth/start`, {
         headers: { 'x-forwarded-for': `203.0.${Math.floor(i / 250)}.${i % 250}` },
       });
       assert.equal(abandoned.status, 302);
     }
     // …and a member still signs in.
-    nextIdentity = { email: TONY, verified: true };
+    nextIdentity = { email: BOB, verified: true };
     assert.equal((await browser.navigate(`${DEMO}/`)).response.status, 200);
     ctx.cleanup();
   });
 
   it('keeps a long deep link through the whole detour', async () => {
     const { ctx, browser } = start();
-    nextIdentity = { email: TONY, verified: true };
+    nextIdentity = { email: BOB, verified: true };
     const deep = `/recherche?q=${encodeURIComponent('é'.repeat(40))}&tri=date`; // 283 characters once encoded
     assert.ok(deep.length > 250 && deep.length < 300);
     const { response, url } = await browser.navigate(`${DEMO}${deep}`);
@@ -204,7 +204,7 @@ describe('Google sign-in (OIDC) and the e-mail allowlist', () => {
 
   it('ends what another member left on a shared browser, and keeps what the same member had', async () => {
     const { ctx, browser } = start();
-    nextIdentity = { email: TONY, verified: true };
+    nextIdentity = { email: BOB, verified: true };
     await browser.navigate(`${DEMO}/`);
     const mine = subscription();
     assert.equal(
@@ -212,34 +212,34 @@ describe('Google sign-in (OIDC) and the e-mail allowlist', () => {
       204,
     );
 
-    // Tony's control-plane cookie is gone (expired), his app session is still there. He signs in again.
+    // Bob's control-plane cookie is gone (expired), his app session is still there. He signs in again.
     browser.deleteCookie(CONTROL, '__Host-socle_session');
     await browser.navigate(`${NOTES}/`);
-    const tony = (await (await browser.fetch(`${DEMO}/_socle/api/me`)).json()) as {
+    const bob = (await (await browser.fetch(`${DEMO}/_socle/api/me`)).json()) as {
       user: { name: string };
       push: { subscriptions: number };
     };
-    assert.equal(tony.user.name, 'tony');
-    assert.equal(tony.push.subscriptions, 1); // nothing of his was touched
+    assert.equal(bob.user.name, 'bob');
+    assert.equal(bob.push.subscriptions, 1); // nothing of his was touched
 
-    // Same situation, but this time Chloé signs in on that browser.
+    // Same situation, but this time Alice signs in on that browser.
     browser.deleteCookie(CONTROL, '__Host-socle_session');
-    nextIdentity = { email: CHLOE, verified: true };
-    await browser.navigate(`${CONTROL}/auth/google/start`);
-    assert.match(await (await browser.request(`${CONTROL}/`)).text(), /Bonjour chloe/);
-    // Tony's session on the app host no longer answers, and his notifications stopped coming here.
+    nextIdentity = { email: ALICE, verified: true };
+    await browser.navigate(`${CONTROL}/auth/start`);
+    assert.match(await (await browser.request(`${CONTROL}/`)).text(), /Hello alice/);
+    // Bob's session on the app host no longer answers, and his notifications stopped coming here.
     assert.equal((await browser.fetch(`${DEMO}/_socle/api/me`)).status, 401);
     assert.equal(get<{ n: number }>(ctx.deps.db, 'SELECT COUNT(*) AS n FROM push_subscriptions')!.n, 0);
     await browser.navigate(`${DEMO}/`);
-    const chloe = (await (await browser.fetch(`${DEMO}/_socle/api/me`)).json()) as { user: { name: string } };
-    assert.equal(chloe.user.name, 'chloe');
+    const alice = (await (await browser.fetch(`${DEMO}/_socle/api/me`)).json()) as { user: { name: string } };
+    assert.equal(alice.user.name, 'alice');
     ctx.cleanup();
   });
 
   it('rejects a callback whose state does not match the browser', async () => {
     const { ctx, browser } = start();
-    nextIdentity = { email: TONY, verified: true };
-    const begin = await browser.request(`${CONTROL}/auth/google/start`);
+    nextIdentity = { email: BOB, verified: true };
+    const begin = await browser.request(`${CONTROL}/auth/start`);
     const back = await browser.request(begin.headers.get('location')!);
     const callback = new URL(back.headers.get('location')!);
     callback.searchParams.set('state', 'forged');
@@ -247,7 +247,7 @@ describe('Google sign-in (OIDC) and the e-mail allowlist', () => {
     assert.equal(browser.cookie(CONTROL, '__Host-socle_session'), undefined);
 
     // Without the cookie of the browser that started (a link opened elsewhere), nothing either.
-    const again = await browser.request(`${CONTROL}/auth/google/start`);
+    const again = await browser.request(`${CONTROL}/auth/start`);
     const real = (await browser.request(again.headers.get('location')!)).headers.get('location')!;
     const elsewhere = new Browser(ctx.app);
     assert.equal((await elsewhere.request(real)).status, 400);

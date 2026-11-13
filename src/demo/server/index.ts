@@ -1,6 +1,7 @@
 // The demo app's server functions. Each one runs in the sandbox, inside one
 // transaction on the app's own database; `user` is whoever is signed in.
 import { fail, mutation, query, v } from '@socle/server';
+import { serverText } from '../shared/text.ts';
 
 const MAX_ITEMS = 50;
 
@@ -10,18 +11,19 @@ export const list = query(({ db }) =>
 
 export const add = mutation({
   input: v.object({ label: v.string().min(1).max(80) }),
-  handler: ({ db, user, now, notify }, { label }) => {
+  handler: ({ db, user, now, notify, locale }, { label }) => {
+    const say = serverText(locale);
     const text = label.trim();
-    if (!text) fail('Écris quelque chose à ajouter.');
+    if (!text) fail(say.empty);
     const { n } = db.get('SELECT COUNT(*) AS n FROM items');
-    if (n >= MAX_ITEMS) fail('La liste est pleine : supprime une ligne d’abord.');
+    if (n >= MAX_ITEMS) fail(say.full);
     const { lastInsertRowid } = db.run(
       'INSERT INTO items (label, author, created_at) VALUES (?, ?, ?)',
       text,
       user.id,
       now,
     );
-    notify('others', { title: `${user.name} a ajouté « ${text} »`, body: 'Liste partagée de la démo', url: '/' });
+    notify('others', { title: say.added(user.name, text), body: say.sharedList, url: '/' });
     return { id: lastInsertRowid };
   },
 });

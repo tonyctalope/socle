@@ -26,7 +26,7 @@ docker run -d --name "$runner" --network none --read-only --tmpfs /tmp --cap-dro
   -v "$data/apps:/apps" -v "$data/run:/run/socle" "$image" node src/runner/main.ts >/dev/null
 docker run -d --name "$web" -p "$port:8787" --read-only --tmpfs /tmp \
   -e CONTROL_URL="http://socle.localhost:$port" -e APPS_DOMAIN=apps.localhost \
-  -e ALLOWED_EMAILS=ci@example.com -e GOOGLE_CLIENT_ID=ci -e GOOGLE_CLIENT_SECRET=ci -e DEMO_APP=1 \
+  -e ALLOWED_EMAILS=ci@example.com -e OIDC_ISSUER=https://accounts.example.com -e OIDC_CLIENT_ID=ci -e OIDC_CLIENT_SECRET=ci -e DEMO_APP=1 \
   -e PORT=8787 -e DATA_DIR=/data -e RUNNER_SOCKET=/data/run/runner.sock \
   -v "$data:/data" "$image" >/dev/null
 for _ in $(seq 1 30); do curl -fsS "$base/healthz" >/dev/null 2>&1 && break; sleep 1; done
@@ -48,7 +48,7 @@ expect "unknown app" 404 "$(status "${resolve[@]/demo/ghost}" "http://ghost.apps
 
 # What the runner container is: no network, no secret, no platform database.
 expect "the runner has no network interface but loopback" lo "$(docker exec "$runner" ls /sys/class/net | tr '\n' ' ' | xargs)"
-expect "the runner knows no secret" 0 "$(docker exec "$runner" env | grep -ciE 'google|vapid|allowed|secret' || true)"
+expect "the runner knows no secret" 0 "$(docker exec "$runner" env | grep -ciE 'oidc|vapid|allowed|secret' || true)"
 expect "the web container's database exists" 1 "$(docker exec "$web" sh -c "ls /data/socle.db | wc -l")"
 expect "the runner does not see the platform database" 0 "$(docker exec "$runner" sh -c "find / \\( -path /proc -o -path /sys -o -path /dev \\) -prune -o -name 'socle.db*' -print 2>/dev/null | wc -l")"
 expect "the demo app has its own database" 1 "$(docker exec "$runner" sh -c 'ls /apps/demo/live.db | wc -l')"
@@ -60,7 +60,7 @@ if out=$(docker run --rm "$image" 2>&1); then echo "FAIL expected a configuratio
 case "$out" in *"Configuration error"*) echo "ok   refuses to start unconfigured";; *) echo "FAIL $out" >&2; exit 1;; esac
 # Production never runs agent-written code in the web container itself.
 if out=$(docker run --rm -e CONTROL_URL=https://socle.example.com -e APPS_DOMAIN=apps.example.com \
-  -e ALLOWED_EMAILS=ci@example.com -e GOOGLE_CLIENT_ID=ci -e GOOGLE_CLIENT_SECRET=ci "$image" 2>&1); then
+  -e ALLOWED_EMAILS=ci@example.com -e OIDC_ISSUER=https://accounts.example.com -e OIDC_CLIENT_ID=ci -e OIDC_CLIENT_SECRET=ci "$image" 2>&1); then
   echo "FAIL expected a refusal without RUNNER_SOCKET" >&2; exit 1
 fi
 case "$out" in *"RUNNER_SOCKET is required"*) echo "ok   refuses to start without a separate runner";; *) echo "FAIL $out" >&2; exit 1;; esac

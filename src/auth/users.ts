@@ -2,7 +2,7 @@ import { get, run, type Db } from '../db/database.ts';
 
 export interface UserRow {
   id: number;
-  google_sub: string | null;
+  subject: string | null;
   email: string;
   name: string | null;
   created_at: string;
@@ -13,12 +13,12 @@ export function upsertUser(db: Db, input: { sub: string | null; email: string; n
   const now = new Date().toISOString();
   const email = input.email.toLowerCase();
   const existing =
-    (input.sub ? get<UserRow>(db, 'SELECT * FROM users WHERE google_sub = :sub', { sub: input.sub }) : undefined) ??
+    (input.sub ? get<UserRow>(db, 'SELECT * FROM users WHERE subject = :sub', { sub: input.sub }) : undefined) ??
     get<UserRow>(db, 'SELECT * FROM users WHERE email = :email', { email });
   if (existing) {
     run(
       db,
-      `UPDATE users SET google_sub = COALESCE(:sub, google_sub), email = :email, name = COALESCE(:name, name),
+      `UPDATE users SET subject = COALESCE(:sub, subject), email = :email, name = COALESCE(:name, name),
          last_login_at = :now WHERE id = :id`,
       { sub: input.sub, email, name: input.name, now, id: existing.id },
     );
@@ -26,7 +26,7 @@ export function upsertUser(db: Db, input: { sub: string | null; email: string; n
   }
   const { lastInsertRowid } = run(
     db,
-    `INSERT INTO users (google_sub, email, name, created_at, last_login_at) VALUES (:sub, :email, :name, :now, :now)`,
+    `INSERT INTO users (subject, email, name, created_at, last_login_at) VALUES (:sub, :email, :name, :now, :now)`,
     { sub: input.sub, email, name: input.name, now },
   );
   return getUser(db, lastInsertRowid)!;
