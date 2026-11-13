@@ -154,7 +154,13 @@ the parent domain. Everything below exists because of that; none of it is option
   everywhere else): a worker written by an app could serve pages without the CSP. The platform worker must never
   `importScripts` or run anything an app provides.
 - Without a session an app host only serves what a browser fetches without cookies to install a PWA (icons,
-  manifest, service worker, SDK). App files and the API need the session of that host.
+  manifest, service worker, SDK), and, for an app that offers tools, its MCP endpoint (`/_socle/mcp`, which only
+  answers a bearer token) with the document that says where to get one
+  (`/.well-known/oauth-protected-resource/_socle/mcp`: the one path the platform takes outside `/_socle/`).
+  App files and the API need the session of that host.
+- **An app's input schemas are data, never programs.** The build records nothing but the platform's small
+  subset (`schemaProblem` refuses every other keyword: `pattern`, `$ref`…), inputs are checked in the sandbox,
+  and the web process advertises a tool's schema to MCP clients without compiling or interpreting it.
 - Apps receive a user id and a display name, never the e-mail address.
 - Secrets (session ids, sign-on codes) are random 256-bit and stored **only as SHA-256 hashes**. Never log query
   strings (the access log in `src/app.ts` drops them).
@@ -249,7 +255,10 @@ builder, the OAuth server). The last one found 22 things, the most serious being
 as it was at the click rather than the one the page showed; all are fixed and pinned by `draft-rules.test.ts`
 and additions to `oauth.test.ts`, `mcp.test.ts` and `drafts.test.ts`. Brief a review as a code review (the rules
 of this file as the specification, findings written to a file as they come, a failing assertion as evidence).
-Not reviewed yet: `src/mcp/app.ts` (per-app endpoints), app removal, `/connections`.
+A second one the same day covered what came after (per-app MCP endpoints, removal, connections, the fixes
+themselves): 19 findings, the serious one being that an app could put a `pattern` in its input schema, which the
+web process then compiled and ran. All fixed and pinned. Not reviewed yet: versions and return, access lists,
+icons, scheduled functions.
 
 ## Roadmap
 

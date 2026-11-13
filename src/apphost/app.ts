@@ -50,9 +50,10 @@ const STREAM_PING_MS = 25_000;
 
 /**
  * Everything served on <slug>.<APPS_DOMAIN>. The platform owns /_socle/*; the rest
- * of the path space belongs to the app. Only what a browser fetches without
- * cookies to install a PWA is public (icons, manifest, service worker, SDK): app
- * files and the API require the session of THIS host.
+ * of the path space belongs to the app. Public: what a browser fetches without cookies
+ * to install a PWA (icons, manifest, service worker, SDK), and the MCP endpoint of an app
+ * that offers tools, which only answers a bearer token (with the one document outside
+ * /_socle/ that says where to get it). App files and the API require the session of THIS host.
  */
 export function appHostApp(deps: Deps): Hono<AppHostEnv> {
   const { config, db } = deps;
@@ -245,15 +246,14 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
   const endpointOf = (slug: string) => {
     let endpoint = endpoints.get(slug);
     if (!endpoint) {
-      endpoint = mcpEndpoint(
-        deps,
-        appResource(config, slug),
-        (caller) => buildAppServer(deps, getApp(db, slug)!, deps.apps.live(slug), caller, callFunction),
-        (caller) => {
-          const row = getApp(db, slug);
-          return row !== undefined && canAccess(caller, row);
-        },
-      );
+      endpoint = mcpEndpoint(deps, appResource(config, slug), (caller) => {
+        // Read at every request: the app may be gone, or closed to this member, since the token was issued.
+        const row = getApp(db, slug);
+        if (!row || !canAccess(caller, row)) return null;
+        return buildAppServer(deps, row, deps.apps.live(slug), caller, callFunction);
+      });
+      // One per app that was ever asked for its tools: names come and go, the map does not grow with them.
+      if (endpoints.size >= 200) endpoints.clear();
       endpoints.set(slug, endpoint);
     }
     return endpoint;

@@ -123,6 +123,8 @@ export class AppStore {
   onRemove: (slug: string) => void = () => {};
   /** One build or publication at a time per app: the second waits for the first. */
   private readonly working = new Map<string, Promise<unknown>>();
+  /** Apps whose removal is under way: they serve nothing from the moment it starts. */
+  private readonly removing = new Set<string>();
   /** Saves asked by agents that are running or waiting, per app. */
   private readonly pending = new Map<string, number>();
 
@@ -182,6 +184,7 @@ export class AppStore {
 
   /** The published version of an app, or null when it has none yet. */
   live(slug: string): AppVersion | null {
+    if (this.removing.has(slug)) return null;
     return this.version(
       get<{ live_version: number | null }>(this.db, 'SELECT live_version FROM apps WHERE slug = :slug', { slug })
         ?.live_version,
@@ -190,6 +193,7 @@ export class AppStore {
 
   /** The last draft of an app that built, or null when it has none. */
   draft(slug: string): AppVersion | null {
+    if (this.removing.has(slug)) return null;
     return this.version(
       get<{ draft_version: number | null }>(this.db, 'SELECT draft_version FROM apps WHERE slug = :slug', { slug })
         ?.draft_version,
@@ -614,7 +618,7 @@ export class AppStore {
    * `shown` is the draft version the administrator was looking at: a draft that was built
    * again since is not published in its place.
    */
-  publishDraft(slug: string, shown?: number): Promise<DeployOutcome> {
+  publishDraft(slug: string, shown: number | null): Promise<DeployOutcome> {
     return this.inTurn(slug, async () => {
       const app = get<{ live_version: number | null; draft_version: number | null }>(
         this.db,
@@ -626,7 +630,7 @@ export class AppStore {
       });
       if (!app?.draft_version) return refused('there is no draft to publish');
       if (draft?.problems) return refused('the draft does not build');
-      if (shown !== undefined && shown !== app.draft_version) {
+      if (shown !== app.draft_version) {
         return refused('the draft changed since it was shown: look at it again before publishing');
       }
       const version = get<{ id: number; manifest: string; migrations: string }>(
@@ -653,8 +657,16 @@ export class AppStore {
    * rebuilt from the published version's migrations (what the discarded draft added to its
    * schema goes with it).
    */
-  discardDraft(slug: string): Promise<DeployOutcome> {
+  discardDraft(slug: string, shown: string | null): Promise<DeployOutcome> {
     return this.inTurn(slug, async () => {
+      // `shown` is when the draft was last saved, as the page showed it: a draft saved again
+      // since is somebody's newer work, and is not thrown away in its place.
+      const draft = get<{ updated_at: string }>(this.db, 'SELECT updated_at FROM app_drafts WHERE app = :slug', {
+        slug,
+      });
+      if ((draft?.updated_at ?? null) !== shown) {
+        return refused('the draft changed since it was shown: look at it again before discarding');
+      }
       const app = get<{ live_version: number | null }>(this.db, 'SELECT live_version FROM apps WHERE slug = :slug', {
         slug,
       });
@@ -697,30 +709,38 @@ export class AppStore {
    * notification subscription of its two addresses. The runner moves its data aside first
    * (kept a month); if that fails, nothing is removed.
    */
-  remove(slug: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  remove(slug: string): Promise<{ ok: true } | { ok: false; gone?: true; message: string }> {
     return this.inTurn(slug, async () => {
       const versions = all<{ id: number }>(this.db, 'SELECT id FROM app_versions WHERE app = :slug', { slug });
       if (!get(this.db, 'SELECT 1 AS found FROM apps WHERE slug = :slug', { slug })) {
-        return { ok: false, message: `there is no app named "${slug}"` };
+        return { ok: false, gone: true, message: `there is no app named "${slug}"` };
       }
-      let moved;
+      // From here on the app serves nothing: no call may reach the runner once its folder moved.
+      this.removing.add(slug);
       try {
-        moved = await this.runner.remove(slug);
-      } catch (error) {
-        if (!(error instanceof RunnerUnavailable)) throw error;
-        return { ok: false, message: "the app's data could not be set aside; nothing was removed" };
-      }
-      if (!moved.ok) return { ok: false, message: moved.message };
-      const labels = [siteOf(slug, false).label, siteOf(slug, true).label];
-      transaction(this.db, () => {
-        for (const label of labels) {
-          run(this.db, 'DELETE FROM sessions WHERE scope = :label', { label });
-          run(this.db, 'DELETE FROM sso_codes WHERE app = :label', { label });
-          run(this.db, 'DELETE FROM push_subscriptions WHERE app = :label', { label });
+        let moved;
+        try {
+          moved = await this.runner.remove(slug);
+        } catch (error) {
+          if (!(error instanceof RunnerUnavailable)) throw error;
+          // The folder may or may not have moved (a job stopped at its deadline): removing again
+          // finishes the work either way.
+          return { ok: false, message: "the app's data could not be set aside; try again" };
         }
-        // Versions, the draft and the log go with the app (ON DELETE CASCADE).
-        run(this.db, 'DELETE FROM apps WHERE slug = :slug', { slug });
-      });
+        if (!moved.ok) return { ok: false, message: moved.message };
+        const labels = [siteOf(slug, false).label, siteOf(slug, true).label];
+        transaction(this.db, () => {
+          for (const label of labels) {
+            run(this.db, 'DELETE FROM sessions WHERE scope = :label', { label });
+            run(this.db, 'DELETE FROM sso_codes WHERE app = :label', { label });
+            run(this.db, 'DELETE FROM push_subscriptions WHERE app = :label', { label });
+          }
+          // Versions, the draft, the log and the schedules go with the app (ON DELETE CASCADE).
+          run(this.db, 'DELETE FROM apps WHERE slug = :slug', { slug });
+        });
+      } finally {
+        this.removing.delete(slug);
+      }
       for (const version of versions) this.forget(version.id);
       this.onRemove(slug);
       return { ok: true };

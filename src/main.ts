@@ -40,7 +40,11 @@ const live = new LiveHub();
 apps.onPublish = (slug) => live.publish(slug, 'version');
 apps.onDraft = (slug) => live.publish(siteOf(slug, true).label, 'version');
 apps.onRemove = (slug) => {
-  for (const draft of [false, true]) live.publish(siteOf(slug, draft).label, 'version');
+  for (const draft of [false, true]) {
+    // Open pages learn they must reload, then their streams end.
+    live.publish(siteOf(slug, draft).label, 'version');
+    live.close(siteOf(slug, draft).label);
+  }
 };
 const deps: Deps = {
   config,

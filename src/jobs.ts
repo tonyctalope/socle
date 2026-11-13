@@ -11,32 +11,62 @@ import type { Deps } from './types.ts';
 
 const KEEP_BACKUPS = 14;
 
+/** A copy that is still running after this long is stopped: the next night starts a new one. */
+const COPY_DEADLINE_MS = 10 * 60_000;
+let copying = false;
+
 /**
  * Consistent snapshot of a database file, one per day, written by a thread of its own so
- * that requests are answered meanwhile. Null when today's copy already exists.
+ * that requests are answered meanwhile. Null when today's copy already exists, or when a
+ * copy is still running. One copy at a time, stopped at a deadline: a copy that hangs does
+ * not leave one more thread behind every night.
  */
-export async function backupDatabase(dataDir: string, date: string): Promise<string | null> {
+export async function backupDatabase(
+  dataDir: string,
+  date: string,
+  deadlineMs = COPY_DEADLINE_MS,
+): Promise<string | null> {
   const dir = path.join(dataDir, 'backups');
   mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `socle-${date}.db`);
-  if (existsSync(file)) return null;
-  // Written under another name first: a copy cut short never looks like a backup.
-  const partial = `${file}.partial`;
-  rmSync(partial, { force: true });
-  await new Promise<void>((resolve, reject) => {
-    const worker = new Worker(new URL('./db/backup-worker.ts', import.meta.url), {
-      workerData: { source: path.join(dataDir, 'socle.db'), target: partial },
+  if (existsSync(file) || copying) return null;
+  copying = true;
+  try {
+    // Written under another name first: a copy cut short never looks like a backup. What
+    // earlier copies left half-written is swept here (only one copy runs at a time).
+    for (const entry of readdirSync(dir)) {
+      if (entry.endsWith('.partial')) rmSync(path.join(dir, entry), { force: true });
+    }
+    const partial = `${file}.partial`;
+    await new Promise<void>((resolve, reject) => {
+      const worker = new Worker(new URL('./db/backup-worker.ts', import.meta.url), {
+        workerData: { source: path.join(dataDir, 'socle.db'), target: partial },
+      });
+      const deadline = setTimeout(() => {
+        void worker.terminate();
+        reject(new Error('the copy took too long and was stopped'));
+      }, deadlineMs);
+      deadline.unref();
+      worker.once('error', (error) => {
+        clearTimeout(deadline);
+        reject(error);
+      });
+      worker.once('exit', (code) => {
+        clearTimeout(deadline);
+        if (code === 0) resolve();
+        else reject(new Error(`backup thread exited with ${code}`));
+      });
     });
-    worker.once('error', reject);
-    worker.once('exit', (code) => (code === 0 ? resolve() : reject(new Error(`backup thread exited with ${code}`))));
-  });
-  renameSync(partial, file);
-  const old = readdirSync(dir)
-    .filter((name) => /^socle-\d{4}-\d{2}-\d{2}\.db$/.test(name))
-    .sort()
-    .slice(0, -KEEP_BACKUPS);
-  for (const name of old) rmSync(path.join(dir, name), { force: true });
-  return file;
+    renameSync(partial, file);
+    const old = readdirSync(dir)
+      .filter((name) => /^socle-\d{4}-\d{2}-\d{2}\.db$/.test(name))
+      .sort()
+      .slice(0, -KEEP_BACKUPS);
+    for (const name of old) rmSync(path.join(dir, name), { force: true });
+    return file;
+  } finally {
+    copying = false;
+  }
 }
 
 /**

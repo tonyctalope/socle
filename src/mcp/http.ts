@@ -17,7 +17,7 @@ import { verifyAccessTokenFor } from '../oauth/tokens.ts';
 import { allowlist, type Deps } from '../types.ts';
 
 // An MCP endpoint of the platform: Streamable HTTP behind the platform's own bearer tokens.
-// Every endpoint (the builder on the control plane, later one per app) shares the same
+// Every endpoint (the builder on the control plane, one per app that offers tools) shares the same
 // authorization server; a token is only good at the endpoint it was issued for.
 
 /** The canonical URI (RFC 8707 resource) of the builder's endpoint. */
@@ -45,15 +45,10 @@ export const mcpCors = cors({
 
 /**
  * Serves one MCP endpoint. `build` makes the server for the member a request's token stands
- * for; it is called for every request, so what a member may do is never older than the request.
+ * for, or returns null when that member may not use the endpoint (any more). It is called
+ * for every request, so what a member may do is never older than the request.
  */
-export function mcpEndpoint(
-  deps: Deps,
-  resource: string,
-  build: (caller: UserRow) => McpServer,
-  /** Asked for every request: false ends it (the member lost the app, or the app its tools). */
-  mayUse: (caller: UserRow) => boolean = () => true,
-) {
+export function mcpEndpoint(deps: Deps, resource: string, build: (caller: UserRow) => McpServer | null) {
   const { db, config } = deps;
   const isAllowed = allowlist(config);
   const gate = requireBearerAuth({
@@ -75,12 +70,14 @@ export function mcpEndpoint(
     resourceMetadataUrl: protectedResourceMetadataUrl(resource),
     expectedResource: new URL(resource),
   });
+  // The server of a request, built once the member is known and handed to the SDK's handler.
+  const servers = new WeakMap<object, McpServer>();
   const handler = createMcpHandler(
     (context) => {
-      const userId = context.authInfo?.extra?.userId;
-      const caller = typeof userId === 'number' ? getUser(db, userId) : undefined;
-      if (!caller) throw new Error('MCP request without a verified caller');
-      return build(caller);
+      const made = context.authInfo?.extra;
+      const server = made ? servers.get(made) : undefined;
+      if (!server) throw new Error('MCP request without a verified caller');
+      return server;
     },
     { onerror: (error) => console.error('mcp error:', error.message), maxRequestBodySize: MAX_BODY },
   );
@@ -96,7 +93,9 @@ export function mcpEndpoint(
     }
     const userId = auth.extra?.userId;
     const caller = typeof userId === 'number' ? getUser(db, userId) : undefined;
-    if (!caller || !mayUse(caller)) return c.json({ error: 'forbidden', message: 'Not available to you.' }, 403);
+    const server = caller ? build(caller) : null;
+    if (!server) return c.json({ error: 'forbidden', message: 'Not available to you.' }, 403);
+    servers.set(auth.extra!, server);
     return handler.fetch(c.req.raw, { authInfo: auth });
   };
 }

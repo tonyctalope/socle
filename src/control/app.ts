@@ -275,7 +275,7 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
   // of every published app that offers tools, for the members who can open that app.
   const resourceCard = (resource: string, user: UserRow) => {
     if (resource === builder) return builderCard();
-    const target = appOfResource(deps, resource, user, (slug) => getApp(db, slug));
+    const target = appOfResource(deps, resource, user);
     if (!target) return null;
     return {
       name: target.name,

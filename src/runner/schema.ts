@@ -33,13 +33,38 @@ function isBound(value: unknown): boolean {
   return value === undefined || (typeof value === 'number' && Number.isFinite(value));
 }
 
-/** Null when `value` is a schema of the subset above, else what is wrong with it. */
+/** The keywords each kind of schema may carry. Nothing else: see `schemaProblem`. */
+const KEYWORDS: Record<string, readonly string[]> = {
+  anyOf: ['anyOf', 'description'],
+  any: ['description'],
+  boolean: ['type', 'description'],
+  null: ['type', 'description'],
+  string: ['type', 'description', 'minLength', 'maxLength', 'format', 'enum'],
+  number: ['type', 'description', 'minimum', 'maximum'],
+  integer: ['type', 'description', 'minimum', 'maximum'],
+  array: ['type', 'description', 'minItems', 'maxItems', 'items'],
+  object: ['type', 'description', 'properties', 'required', 'additionalProperties'],
+};
+const MAX_DESCRIPTION = 500;
+
+/**
+ * Null when `value` is a schema of the subset above, else what is wrong with it. A schema is
+ * written by an app (it can put anything in the object `v` built), then recorded, advertised
+ * to MCP clients and read by other software: a keyword that is not of the subset (`pattern`,
+ * `$ref`, `$id`…) is refused, not ignored, so that what is recorded is exactly the subset.
+ */
 export function schemaProblem(value: unknown, path = 'schema', depth = 0): string | null {
   if (depth > MAX_DEPTH) return `${path}: nested too deeply`;
   if (!isRecord(value)) return `${path}: expected a schema object`;
-  if (value.description !== undefined && typeof value.description !== 'string') {
-    return `${path}.description: expected text`;
+  if (value.description !== undefined) {
+    if (typeof value.description !== 'string') return `${path}.description: expected text`;
+    if (value.description.length > MAX_DESCRIPTION) return `${path}.description: ${MAX_DESCRIPTION} characters at most`;
   }
+  const kind = 'anyOf' in value ? 'anyOf' : value.type === undefined ? 'any' : String(value.type);
+  const allowed = Object.hasOwn(KEYWORDS, kind) ? KEYWORDS[kind]! : null;
+  if (!allowed) return `${path}.type: unsupported type ${JSON.stringify(value.type)}`;
+  const extra = Object.keys(value).find((key) => !allowed.includes(key));
+  if (extra !== undefined) return `${path}: unsupported keyword ${JSON.stringify(extra.slice(0, 40))}`;
   if ('anyOf' in value) {
     if (!Array.isArray(value.anyOf) || value.anyOf.length === 0 || value.anyOf.length > 16) {
       return `${path}.anyOf: expected 1 to 16 schemas`;

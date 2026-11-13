@@ -1,6 +1,6 @@
 import { buildApp, type BuildOutcome } from './build/build.ts';
 import { buildVendor, type VendorFiles } from './build/vendor.ts';
-import { BundleStore, removeApp } from './bundles.ts';
+import { BundleStore, purgeRemoved, removeApp } from './bundles.ts';
 import type { Limits } from './limits.ts';
 import {
   AppDatabases,
@@ -115,6 +115,7 @@ export function createExecutor(appsDir: string, limits: Limits): Executor {
         }
       case 'backup':
         try {
+          purgeRemoved(appsDir);
           return { ok: true, written: backupDatabase(appsDir, job.database, job.date, job.keep) !== null };
         } catch (error) {
           return { ok: false, message: (error as Error).message };

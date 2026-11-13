@@ -64,7 +64,7 @@ const FR: Record<string, string> = {
   'Discard the draft': 'Abandonner le brouillon',
   'Not published': 'Non publiée',
   'Nothing changed for the members.': 'Rien n’a changé pour les membres.',
-  'The app was removed.': 'L’appli a été supprimée.',
+  '{name} was removed.': '{name} a été supprimée.',
   'Not discarded': 'Brouillon non abandonné',
   'Versions, access, removal…': 'Versions, accès, suppression…',
   'Saved.': 'Enregistré.',

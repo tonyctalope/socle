@@ -45,7 +45,7 @@ describe('the two addresses of an app share nothing', () => {
     const { userId } = signIn(ctx, bob, BOB);
     ctx.deps.apps.create('tasks', { name: 'Tasks', description: '' }, { id: userId });
     assert.ok((await ctx.deps.apps.saveDraft('tasks', tasks('one'), { id: userId })).ok);
-    assert.ok((await ctx.deps.apps.publishDraft('tasks')).ok);
+    assert.ok((await ctx.deps.apps.publishDraft('tasks', ctx.deps.apps.status('tasks')!.draft.versionId)).ok);
     assert.ok((await ctx.deps.apps.saveDraft('tasks', tasks('two'), { id: userId })).ok);
   });
   after(() => ctx.cleanup());
@@ -208,7 +208,7 @@ describe('operations on a draft, when they overlap or fail', () => {
     bobId = signIn(ctx, new Browser(ctx.app), BOB).userId;
     apps().create('tasks', { name: 'Tasks', description: '' }, { id: bobId });
     assert.ok((await apps().saveDraft('tasks', tasks('one'), { id: bobId })).ok);
-    assert.ok((await apps().publishDraft('tasks')).ok);
+    assert.ok((await apps().publishDraft('tasks', apps().status('tasks')!.draft.versionId)).ok);
   });
   after(() => ctx.cleanup());
 
@@ -234,11 +234,18 @@ describe('operations on a draft, when they overlap or fail', () => {
     assert.deepEqual(apps().files('tasks', 'draft'), before);
   });
 
-  it('discards for good: a save that was building does not bring the edits back', async () => {
+  it('discards the draft that was shown, not one saved since', async () => {
+    const shown = apps().status('tasks')!.draft.updatedAt; // what the administration page showed
     const saving = apps().saveDraft('tasks', tasks('three'), { id: bobId });
-    const discarding = apps().discardDraft('tasks'); // asked while the build runs: it takes its turn after it
+    const discarding = apps().discardDraft('tasks', shown); // asked while the build runs: it takes its turn after it
     assert.ok((await saving).ok);
-    assert.ok((await discarding).ok);
+    // Somebody's newer work is not thrown away in place of what the administrator looked at.
+    const refused = await discarding;
+    assert.equal(refused.ok, false);
+    assert.match(JSON.stringify(refused), /the draft changed since it was shown/);
+    assert.deepEqual(apps().files('tasks', 'draft'), tasks('three'));
+    // Discarded for good once it is the one that was looked at.
+    assert.ok((await apps().discardDraft('tasks', apps().status('tasks')!.draft.updatedAt)).ok);
     const status = apps().status('tasks')!;
     assert.equal(status.draft.differs, false);
     assert.equal(status.draft.versionId, status.live?.versionId);
@@ -247,7 +254,7 @@ describe('operations on a draft, when they overlap or fail', () => {
 
   it('brings the draft’s database back to the published schema when a draft is discarded', async () => {
     assert.ok((await apps().saveDraft('tasks', withDone('two'), { id: bobId })).ok);
-    assert.ok((await apps().discardDraft('tasks')).ok);
+    assert.ok((await apps().discardDraft('tasks', apps().status('tasks')!.draft.updatedAt)).ok);
     // Nothing of the discarded draft's schema is left for the next draft to build on by accident.
     assert.deepEqual(await ctx.deps.runner.migrate('tasks/draft', migrations('001_init.sql')), {
       ok: true,
@@ -257,17 +264,19 @@ describe('operations on a draft, when they overlap or fail', () => {
     // The same migration name can be used again, with other SQL.
     const other = tasks('two', { 'migrations/002_done.sql': 'ALTER TABLE tasks ADD COLUMN note TEXT;' });
     assert.ok((await apps().saveDraft('tasks', other, { id: bobId })).ok);
-    assert.ok((await apps().discardDraft('tasks')).ok);
+    assert.ok((await apps().discardDraft('tasks', apps().status('tasks')!.draft.updatedAt)).ok);
   });
 
   it('keeps the published database and the published version in step when a discard meets a publication', async () => {
     assert.ok((await apps().saveDraft('tasks', withDone('two'), { id: bobId })).ok);
-    const publishing = apps().publishDraft('tasks');
-    const discarding = apps().discardDraft('tasks');
+    const publishing = apps().publishDraft('tasks', apps().status('tasks')!.draft.versionId);
+    const discarding = apps().discardDraft('tasks', apps().status('tasks')!.draft.updatedAt);
     const published = await publishing;
     assert.ok(published.ok, JSON.stringify(published));
-    assert.ok((await discarding).ok);
+    // The discard took its turn after the publication: the draft it named is published, there is nothing to discard.
+    assert.equal((await discarding).ok, false);
     const status = apps().status('tasks')!;
+    assert.equal(status.draft.differs, false);
     assert.equal(status.live?.versionId, published.versionId);
     // The published database has exactly the migrations of the published version.
     assert.deepEqual(await ctx.deps.runner.migrate('tasks/live', migrations('001_init.sql', '002_done.sql')), {
@@ -312,6 +321,26 @@ describe('operations on a draft, when they overlap or fail', () => {
     }
   });
 
+  it('accepts in a draft that was emptied nothing the published database would refuse', async () => {
+    apps().create('strict', { name: 'Strict', description: '' }, { id: bobId });
+    const strict = (extra: string) => ({
+      'app.json': JSON.stringify({ name: 'Strict' }),
+      'web/main.tsx': 'export default function App() { return null; }',
+      'migrations/001_init.sql': `CREATE TABLE parents (id INTEGER PRIMARY KEY);
+        CREATE TABLE children (id INTEGER PRIMARY KEY, parent INTEGER NOT NULL REFERENCES parents(id)); ${extra}`,
+    });
+    assert.ok((await apps().saveDraft('strict', strict(''), { id: bobId })).ok);
+    // A row that points at nothing: refused when the draft's database is rebuilt, as it would be anywhere.
+    const orphan = strict('INSERT INTO children (id, parent) VALUES (1, 99);');
+    const emptied = await apps().saveDraft('strict', orphan, { id: bobId }, { resetData: true });
+    assert.equal(emptied.ok, false);
+    assert.match(JSON.stringify(emptied), /FOREIGN KEY constraint failed/);
+    const direct = await ctx.deps.runner.migrate('strict/other', [
+      { name: '001_init.sql', sql: orphan['migrations/001_init.sql'] },
+    ]);
+    assert.equal(direct.ok, false);
+  });
+
   it('keeps each app’s log lines whatever the other apps, or its own draft, log', () => {
     apps().create('other', { name: 'Other', description: '' }, { id: bobId });
     for (let index = 0; index < 100; index++) apps().log('tasks', 'live', 'log', 'f', `line ${index}`);
@@ -338,7 +367,49 @@ describe('operations on a draft, when they overlap or fail', () => {
     } finally {
       runner.migrate = migrate;
     }
-    assert.ok((await apps().discardDraft('tasks')).ok);
+    assert.ok((await apps().discardDraft('tasks', apps().status('tasks')!.draft.updatedAt)).ok);
+  });
+});
+
+describe('a function’s input, as an app describes it', () => {
+  it('records nothing but the platform’s own keywords, whatever the app puts in the object', async () => {
+    const ctx = setup({ limits: TEST_LIMITS });
+    try {
+      const { userId } = signIn(ctx, new Browser(ctx.app), BOB);
+      ctx.deps.apps.create('probe', { name: 'Probe', description: '' }, { id: userId });
+      const probe = (tamper: string) => ({
+        'app.json': JSON.stringify({ name: 'Probe' }),
+        'web/main.tsx': 'export default function App() { return null; }',
+        'server/index.ts': `import { mutation, v } from '@socle/server';
+          const input = v.object({ label: v.string() });
+          ${tamper}
+          export const add = mutation({ tool: 'Adds a thing to the list of things.', input, handler: (_c, { label }) => label });`,
+      });
+      // Nothing is frozen in the sandbox: an app can add to the schema `v` built. What other software
+      // would interpret (a pattern is a program) is refused by the build, not recorded.
+      for (const tamper of [
+        "input.schema.properties.label.pattern = '^(a+)+$';",
+        "input.schema.properties.label['$ref'] = '#/x';",
+        "input.schema['$id'] = 'https://example.com/schema';",
+        "input.schema.properties.label.format = 'regex';",
+        "input.schema.patternProperties = { '^(a+)+$': {} };",
+        "input.schema.properties.label.description = 'x'.repeat(600);",
+      ]) {
+        const refused = await ctx.deps.apps.saveDraft('probe', probe(tamper), { id: userId });
+        assert.equal(refused.ok, false, tamper);
+        assert.match(JSON.stringify(refused), /unsupported keyword|only \\"date\\"|characters at most/, tamper);
+      }
+      const built = await ctx.deps.apps.saveDraft('probe', probe(''), { id: userId });
+      assert.ok(built.ok, JSON.stringify(built));
+      assert.deepEqual(ctx.deps.apps.draft('probe')!.functions.get('add')!.input, {
+        type: 'object',
+        properties: { label: { type: 'string' } },
+        required: ['label'],
+        additionalProperties: false,
+      });
+    } finally {
+      ctx.cleanup();
+    }
   });
 });
 
@@ -401,7 +472,7 @@ describe('text that comes from agents, on the platform’s pages', () => {
 
       // Published, the name and description reach every member's home page.
       assert.ok((await ctx.deps.apps.saveDraft('hostile', files, { id: userId })).ok);
-      assert.ok((await ctx.deps.apps.publishDraft('hostile')).ok);
+      assert.ok((await ctx.deps.apps.publishDraft('hostile', ctx.deps.apps.status('hostile')!.draft.versionId)).ok);
       const home = await (await member.request(`${CONTROL}/`)).text();
       assert.match(home, /&lt;img src=x/);
       for (const markup of [/<img src=x/, /<script/i]) assert.doesNotMatch(home, markup);

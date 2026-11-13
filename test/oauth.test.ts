@@ -17,7 +17,14 @@ import {
   protectedResourceMetadataUrl,
 } from '../src/oauth/metadata.ts';
 import { oauthRoutes, type ResourceResolver } from '../src/oauth/routes.ts';
-import { listGrants, purgeOAuth, revokeGrant, verifyAccessToken, verifyAccessTokenFor } from '../src/oauth/tokens.ts';
+import {
+  listGrants,
+  purgeOAuth,
+  revokeGrant,
+  verifyAccessToken,
+  verifyAccessTokenFor,
+  revokeResource,
+} from '../src/oauth/tokens.ts';
 import { allowlist, type ControlEnv } from '../src/types.ts';
 import { ALICE, BOB, Browser, CONTROL, DEMO, NOTES, setup, signIn, type TestContext } from './helpers.ts';
 
@@ -1071,5 +1078,138 @@ describe('OAuth authorization server for MCP clients', () => {
     assert.equal(redirectMatches(registeredUri, 'http://127.0.0.1:777/other'), false);
     assert.equal(redirectMatches(registeredUri, 'http://127.0.0.1:777/cb#x'), false);
     assert.equal(redirectMatches(registeredUri, 'http://localhost:777/cb'), false);
+  });
+
+  it('only turns a code or a refresh token into tokens for an endpoint that still exists for that member', async (t) => {
+    const p = start(t);
+    t.after(() => closed.clear());
+    // A code issued, then the endpoint goes away (its app was removed, or stopped offering tools).
+    const client = await registered(p, { redirect_uris: [CALLBACK], token_endpoint_auth_method: 'none' });
+    const { verifier, challenge } = pkce();
+    const back = await authorize(browserOf(p, BOB), {
+      response_type: 'code',
+      client_id: client.client_id!,
+      redirect_uri: CALLBACK,
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+      resource: DEMO_MCP,
+    });
+    const exchange = () =>
+      token(p, {
+        grant_type: 'authorization_code',
+        client_id: client.client_id!,
+        code: back.searchParams.get('code')!,
+        redirect_uri: CALLBACK,
+        code_verifier: verifier,
+      });
+    closed.add(DEMO_MCP);
+    const refused = await exchange();
+    assert.equal(refused.status, 400);
+    assert.equal(refused.json.error, 'invalid_target');
+    assert.equal(count(p, 'oauth_grants'), 0);
+
+    // A connection that exists gets no new token while its endpoint is away, and works again when it is back.
+    closed.clear();
+    const live = await connected(p, BOB, DEMO_MCP);
+    const refresh = (refreshToken: string) =>
+      token(p, { grant_type: 'refresh_token', client_id: live.clientId, refresh_token: refreshToken });
+    closed.add(DEMO_MCP);
+    const waiting = await refresh(live.tokens.refresh_token!);
+    assert.equal(waiting.status, 400);
+    assert.equal(waiting.json.error, 'invalid_target');
+    closed.clear();
+    assert.equal((await refresh(live.tokens.refresh_token!)).status, 200);
+
+    // Removing an endpoint for good ends what was on its way to becoming a connection too.
+    const pending = await authorize(browserOf(p, BOB), {
+      response_type: 'code',
+      client_id: client.client_id!,
+      redirect_uri: CALLBACK,
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+      resource: DEMO_MCP,
+    });
+    assert.ok(pending.searchParams.get('code'));
+    assert.equal(count(p, 'oauth_codes', "used_at IS NULL AND resource = '" + DEMO_MCP + "'") > 0, true);
+    revokeResource(p.deps.db, DEMO_MCP);
+    assert.equal(count(p, 'oauth_codes', "resource = '" + DEMO_MCP + "'"), 0);
+    assert.equal(count(p, 'oauth_grants', "revoked_at IS NULL AND resource = '" + DEMO_MCP + "'"), 0);
+  });
+
+  it('forgets a withdrawn client document for good, and does not ask a failing host again at once', async (t) => {
+    const docUrl = 'https://claude.ai/oauth/other-client.json';
+    let answer: 'ok' | 'down' | 'gone' = 'ok';
+    let fetches = 0;
+    const p = start(t, {
+      fetch: async () => {
+        fetches += 1;
+        if (answer === 'down') return new Response('unavailable', { status: 503 });
+        if (answer === 'gone') return new Response('gone', { status: 404 });
+        return Response.json(
+          { client_id: docUrl, client_name: 'Other', redirect_uris: [CALLBACK], token_endpoint_auth_method: 'none' },
+          { headers: { 'cache-control': 'max-age=300' } },
+        );
+      },
+    });
+    const browser = browserOf(p, BOB);
+    const params = {
+      response_type: 'code',
+      client_id: docUrl,
+      redirect_uri: CALLBACK,
+      code_challenge: pkce().challenge,
+      code_challenge_method: 'S256',
+      resource: BUILDER,
+    };
+    const accepted = async (from: number) => {
+      const response = await begin(browser, params, { 'x-forwarded-for': `203.0.113.${from}` });
+      return response.status === 302 && /request=/.test(response.headers.get('location') ?? '');
+    };
+    assert.equal(await accepted(1), true);
+    const realNow = Date.now;
+    let offset = 0;
+    Date.now = () => realNow() + offset;
+    try {
+      // Withdrawn, then its host fails: the document does not come back through the back door.
+      answer = 'gone';
+      offset += 6 * 60 * 1000;
+      assert.equal(await accepted(2), false);
+      answer = 'down';
+      offset += 6 * 60 * 1000;
+      assert.equal(await accepted(3), false);
+      // A host that just failed is not asked again by every request that names it.
+      const before = fetches;
+      for (let index = 0; index < 10; index++) assert.equal(await accepted(10 + index), false);
+      assert.equal(fetches, before);
+
+      // Back, read again, then down: used for an hour after that read, not a minute more.
+      answer = 'ok';
+      offset += 6 * 60 * 1000;
+      assert.equal(await accepted(4), true);
+      answer = 'down';
+      let lastAccepted = 0;
+      for (let minute = 6; minute <= 90; minute += 3) {
+        offset += 3 * 60 * 1000;
+        if (await accepted(30 + minute)) lastAccepted = minute;
+      }
+      assert.ok(lastAccepted > 30, 'the grace was never used');
+      assert.ok(lastAccepted <= 60, `still accepted ${lastAccepted} minutes after the last successful read`);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it('does not count against a visitor what a page of another site sends in their name', async (t) => {
+    const p = start(t);
+    const body = JSON.stringify({ redirect_uris: ['http://127.0.0.1/cb'], client_name: 'x' });
+    const post = (headers: Record<string, string>) =>
+      p.app.request(`${CONTROL}/oauth/register`, {
+        method: 'POST',
+        headers: { 'x-forwarded-for': '198.51.100.77', ...headers },
+        body,
+      });
+    for (let index = 0; index < 25; index++) {
+      assert.equal((await post({ 'content-type': 'text/plain', 'sec-fetch-site': 'same-site' })).status, 403);
+    }
+    assert.equal((await post({ 'content-type': 'application/json' })).status, 201);
   });
 });
