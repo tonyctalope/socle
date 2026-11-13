@@ -72,9 +72,38 @@ export interface FunctionInfo {
   input: Schema | null;
   /** The description Claude reads when the function is offered as a tool. */
   tool: string | null;
+  /** When the platform runs the function by itself (then nobody else can call it). Absent in versions built before schedules existed. */
+  schedule?: Schedule | null;
+}
+
+/** `at` is HH:MM in the instance's timezone; `on` a day of the week, for a weekly schedule. */
+export type Schedule = { every: 'hour' } | { every: 'day'; at: string } | { every: 'week'; on: Weekday; at: string };
+export const WEEKDAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'] as const;
+export type Weekday = (typeof WEEKDAYS)[number];
+
+/** What an app wrote as a schedule, checked field by field. Throws with what is wrong. */
+export function readSchedule(name: string, given: unknown): Schedule | null {
+  if (given === null || given === undefined) return null;
+  const wrong = (): never => {
+    throw new GuestFailure(
+      'error',
+      `${name}: a schedule is { every: 'hour' }, { every: 'day', at: 'HH:MM' } or { every: 'week', on: 'monday', at: 'HH:MM' }`,
+    );
+  };
+  if (typeof given !== 'object') return wrong();
+  const { every, at, on } = given as Record<string, unknown>;
+  const time = typeof at === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(at) ? at : null;
+  if (every === 'hour' && at === undefined && on === undefined) return { every };
+  if (every === 'day' && time && on === undefined) return { every, at: time };
+  if (every === 'week' && time && typeof on === 'string' && (WEEKDAYS as readonly string[]).includes(on)) {
+    return { every, on: on as Weekday, at: time };
+  }
+  return wrong();
 }
 
 const FUNCTION_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+/** Scheduled functions an app may have: each one is a call the platform makes without being asked. */
+const MAX_SCHEDULES = 10;
 /** No form sends data nested like this; parsers, on the other hand, pay for every level. */
 const MAX_INPUT_DEPTH = 64;
 
@@ -377,9 +406,16 @@ export async function describeBundle(bundle: string, limits: Limits): Promise<Fu
       if (info.tool !== null && info.input !== null && !('type' in info.input && info.input.type === 'object')) {
         throw new GuestFailure('error', `${info.name}: a function offered as a tool takes v.object({ … }) as input`);
       }
+      info.schedule = readSchedule(info.name, info.schedule);
+      if (info.schedule && (info.kind !== 'mutation' || info.input !== null || info.tool !== null)) {
+        throw new GuestFailure('error', `${info.name}: a scheduled function takes no input and is not a tool`);
+      }
       if (info.tool !== null && (info.tool.trim().length < 10 || info.tool.length > 1_000)) {
         throw new GuestFailure('error', `${info.name}.tool: the description for Claude must be 10 to 1000 characters`);
       }
+    }
+    if (listed.filter((info) => info.schedule).length > MAX_SCHEDULES) {
+      throw new GuestFailure('error', `too many scheduled functions (limit ${MAX_SCHEDULES})`);
     }
     return listed.sort((a, b) => a.name.localeCompare(b.name));
   } finally {

@@ -22,6 +22,8 @@ interface Definition {
   handler: Handler;
   input: Schema | null;
   tool: string | null;
+  /** When the platform runs the function by itself, as the app wrote it (checked on the other side). */
+  schedule: unknown;
 }
 
 /** An error whose message is meant for the person using the app. */
@@ -50,7 +52,7 @@ class UnknownFunction extends Error {
 
 const definitions = new WeakMap<object, Definition>();
 
-function define(kind: Kind, spec: unknown): object {
+function define(kind: Kind, spec: unknown, schedule: unknown = null): object {
   const given = typeof spec === 'function' ? { handler: spec } : (spec as Record<string, unknown> | null);
   if (!given || typeof given.handler !== 'function') {
     throw new TypeError(`${kind}() takes a function, or { input, handler }`);
@@ -64,8 +66,26 @@ function define(kind: Kind, spec: unknown): object {
     throw new TypeError(`${kind}(): tool is the description Claude reads, as text`);
   }
   const marker = Object.freeze({ kind });
-  definitions.set(marker, { kind, handler: given.handler as Handler, input, tool: (given.tool as string) ?? null });
+  definitions.set(marker, {
+    kind,
+    handler: given.handler as Handler,
+    input,
+    tool: (given.tool as string) ?? null,
+    schedule,
+  });
   return marker;
+}
+
+/** A mutation the platform runs by itself: `schedule({ every: 'day', at: '08:00', handler })`. */
+function scheduled(spec: unknown): object {
+  const given = spec as Record<string, unknown> | null;
+  if (!given || typeof given !== 'object' || typeof given.handler !== 'function') {
+    throw new TypeError('schedule() takes { every, at, handler }');
+  }
+  if (given.input !== undefined || given.tool !== undefined) {
+    throw new TypeError('schedule(): a scheduled function takes no input and is not a tool');
+  }
+  return define('mutation', { handler: given.handler }, { every: given.every, at: given.at, on: given.on });
 }
 
 function exported(name: string): Definition | undefined {
@@ -161,7 +181,15 @@ function describe(): string {
   const functions = [];
   for (const name of Object.keys(app)) {
     const definition = exported(name);
-    if (definition) functions.push({ name, kind: definition.kind, input: definition.input, tool: definition.tool });
+    if (definition) {
+      functions.push({
+        name,
+        kind: definition.kind,
+        input: definition.input,
+        tool: definition.tool,
+        schedule: definition.schedule,
+      });
+    }
   }
   return toJson(functions);
 }
@@ -173,6 +201,7 @@ function fail(message: string, code?: string): never {
 export const socle = Object.freeze({
   query: (spec: unknown) => define('query', spec),
   mutation: (spec: unknown) => define('mutation', spec),
+  schedule: scheduled,
   v,
   fail,
   UserError,

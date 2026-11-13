@@ -21,7 +21,8 @@ export interface FunctionCall {
   info: FunctionInfo;
   /** The input as JSON text: it is checked inside the sandbox, against what the function declared. */
   inputJson: string;
-  caller: { id: number; name: string };
+  /** Who calls. Null when the platform runs a scheduled function by itself. */
+  caller: { id: number; name: string } | null;
   /** Names the page that made the change, so that it does not refresh itself. */
   client?: string;
   /** Aborted when the caller left: a call still waiting for its turn is dropped. */
@@ -56,7 +57,7 @@ function createCaller(deps: Deps): FunctionCaller {
   const notifyLimiter = new RateLimiter(30, 60_000);
 
   /** Sends what a mutation asked for, to members of this app only. */
-  const notify = (app: AppRow, site: Site, callerId: number, effects: NotifyEffect[]) => {
+  const notify = (app: AppRow, site: Site, callerId: number | null, effects: NotifyEffect[]) => {
     if (effects.length === 0) return;
     const members = appMembers(db, app, isAllowed).map((member) => member.id);
     for (const [index, effect] of effects.entries()) {
@@ -136,7 +137,8 @@ function createCaller(deps: Deps): FunctionCaller {
     }
     if (result.kind === 'mutation') {
       deps.live.publish(site.label, 'change', { client: client && /^[a-z0-9]{1,40}$/.test(client) ? client : '' });
-      notify(app, site, caller.id, result.effects);
+      // Without a caller, "others" is everyone.
+      notify(app, site, caller?.id ?? null, result.effects);
     }
     return result;
   };
