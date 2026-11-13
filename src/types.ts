@@ -3,7 +3,7 @@ import type { LiveHub } from './apphost/live.ts';
 import type { VendorCache } from './apphost/vendor.ts';
 import type { AppRow } from './apps/registry.ts';
 import type { AppStore } from './apps/store.ts';
-import type { IdentityProvider } from './auth/google.ts';
+import type { IdentityProvider } from './auth/oidc.ts';
 import type { ActiveSession } from './auth/sessions.ts';
 import type { Config } from './config.ts';
 import type { Db } from './db/database.ts';

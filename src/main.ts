@@ -6,7 +6,7 @@ import { LiveHub } from './apphost/live.ts';
 import { VendorCache } from './apphost/vendor.ts';
 import { syncDemoApp } from './apps/demo.ts';
 import { AppStore } from './apps/store.ts';
-import { createGoogleProvider } from './auth/google.ts';
+import { createOidcProvider } from './auth/oidc.ts';
 import { appOrigin, ConfigError, loadConfig, type Config } from './config.ts';
 import { openDatabase } from './db/database.ts';
 import { startJobs } from './jobs.ts';
@@ -40,7 +40,7 @@ apps.onPublish = (slug) => live.publish(slug, 'version');
 const deps: Deps = {
   config,
   db,
-  identity: createGoogleProvider(config),
+  identity: createOidcProvider(config),
   push: createPushService(db, config),
   runner,
   apps,
@@ -52,7 +52,7 @@ const deps: Deps = {
 /** Needs the runner, which may start after this process: keep trying, the rest of the platform works meanwhile. */
 async function prepareApps(attempt = 1): Promise<void> {
   try {
-    const outcome = await syncDemoApp(db, apps, config.demoApp);
+    const outcome = await syncDemoApp(db, apps, config.demoApp, config.locale);
     if (outcome && !outcome.ok) {
       console.error(`demo app not published (${outcome.stage}):`, JSON.stringify(outcome.problems));
     } else if (outcome && !outcome.unchanged) {

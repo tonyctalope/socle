@@ -1,5 +1,5 @@
 // Every bound the runner puts on code and data it did not write. They are generous for
-// a household app and exist so that a wrong or hostile app can only hurt itself.
+// an app shared by a few people and exist so that a wrong or hostile app can only hurt itself.
 
 const KiB = 1024;
 const MiB = 1024 * KiB;

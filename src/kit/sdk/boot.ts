@@ -12,6 +12,8 @@ export interface Boot {
   /** Everyone who can open this app, the signed-in user included. */
   members: Member[];
   push: { publicKey: string };
+  /** Language of the platform's own words, e.g. "en". */
+  locale: string;
 }
 
 function read(): Boot {
@@ -21,3 +23,14 @@ function read(): Boot {
 }
 
 export const boot: Boot = read();
+
+/**
+ * The language the instance is set to ("en", "fr"…): what the platform's own components
+ * speak, and a good default for `toLocaleDateString(locale)`.
+ */
+export const locale: string = boot.locale || 'en';
+
+/** Picks the platform's words for that language; English when there is no translation. */
+export function words<T>(all: { en: T } & Record<string, T>): T {
+  return all[locale] ?? all.en;
+}

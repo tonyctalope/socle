@@ -7,7 +7,7 @@ import { createApp } from '../src/app.ts';
 import { LiveHub } from '../src/apphost/live.ts';
 import type { VendorAsset } from '../src/apphost/vendor.ts';
 import { AppStore } from '../src/apps/store.ts';
-import type { IdentityProvider } from '../src/auth/google.ts';
+import type { IdentityProvider } from '../src/auth/oidc.ts';
 import { CONTROL_SCOPE, createSession } from '../src/auth/sessions.ts';
 import { upsertUser } from '../src/auth/users.ts';
 import { loadConfig, type Config } from '../src/config.ts';
@@ -21,8 +21,8 @@ import type { Deps } from '../src/types.ts';
 console.info = () => {};
 console.warn = () => {};
 
-export const TONY = 'tony@example.com';
-export const CHLOE = 'chloe@example.org';
+export const BOB = 'bob@example.com';
+export const ALICE = 'alice@example.org';
 export const STRANGER = 'mallory@example.net';
 
 export const CONTROL = 'https://socle.test';
@@ -35,9 +35,10 @@ export function testConfig(env: Record<string, string> = {}): Config {
   return loadConfig({
     CONTROL_URL: CONTROL,
     APPS_DOMAIN: 'apps.test',
-    ALLOWED_EMAILS: `${TONY}, ${CHLOE}`,
-    GOOGLE_CLIENT_ID: 'google-client',
-    GOOGLE_CLIENT_SECRET: 'google-secret',
+    ALLOWED_EMAILS: `${BOB}, ${ALICE}`,
+    OIDC_ISSUER: 'https://accounts.example.com',
+    OIDC_CLIENT_ID: 'socle-client',
+    OIDC_CLIENT_SECRET: 'socle-secret',
     DEMO_APP: '1',
     ...env,
   });
@@ -102,7 +103,7 @@ export function setup(
   const apps = new AppStore(db, runner);
   const live = new LiveHub();
   apps.onPublish = (slug) => live.publish(slug, 'version');
-  publishFake(apps, 'demo', 'Démo');
+  publishFake(apps, 'demo', 'Demo');
   // A second app, registered but without a published version.
   run(db, `INSERT INTO apps (slug, name, created_at) VALUES ('notes', 'Notes', :now)`, {
     now: new Date().toISOString(),
@@ -149,7 +150,7 @@ export class Browser {
   readonly app: Hono;
   /** Every Set-Cookie header received, to assert on attributes. */
   readonly setCookies: string[] = [];
-  /** Requests for these origins go to the network instead of the app (the fake Google). */
+  /** Requests for these origins go to the network instead of the app (the fake sign-in provider). */
   readonly external: string[] = [];
   private readonly jars = new Map<string, Map<string, StoredCookie>>();
 
@@ -235,7 +236,7 @@ export class Browser {
   }
 }
 
-/** Signs a user in on the control plane without going through Google. */
+/** Signs a user in on the control plane without going through the sign-in provider. */
 export function signIn(ctx: TestContext, browser: Browser, email: string): { userId: number; family: string } {
   const user = upsertUser(ctx.deps.db, { sub: `sub-${email}`, email, name: email.split('@')[0]! });
   const family = `family-${randomBytes(6).toString('hex')}`;

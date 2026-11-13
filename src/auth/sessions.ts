@@ -76,13 +76,13 @@ export function resolveSession(
     u_id: number;
     email: string;
     name: string | null;
-    google_sub: string | null;
+    subject: string | null;
     u_created: string;
     last_login_at: string | null;
   }>(
     db,
     `SELECT s.scope, s.family, s.created_at, s.last_seen_at, s.expires_at,
-            u.id AS u_id, u.email, u.name, u.google_sub, u.created_at AS u_created, u.last_login_at
+            u.id AS u_id, u.email, u.name, u.subject, u.created_at AS u_created, u.last_login_at
        FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id_hash = :id`,
     { id: idHash },
   );
@@ -110,7 +110,7 @@ export function resolveSession(
       id: row.u_id,
       email: row.email,
       name: row.name,
-      google_sub: row.google_sub,
+      subject: row.subject,
       created_at: row.u_created,
       last_login_at: row.last_login_at,
     },

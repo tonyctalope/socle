@@ -9,7 +9,34 @@ import {
   type TextareaHTMLAttributes,
   useId,
 } from 'react';
-import { logout, usePush } from '@socle/sdk';
+import { logout, usePush, words } from '@socle/sdk';
+
+const TEXT = words({
+  en: {
+    loading: 'Loading…',
+    unsupported: 'This browser does not offer notifications.',
+    denied: 'Notifications are blocked for this app in the browser settings.',
+    off: 'Notifications are off on this device.',
+    on: 'Notifications are on for this device.',
+    needsInstall: 'On iPhone and iPad, notifications only work once the app is added to the Home Screen.',
+    turnOn: 'Turn notifications on',
+    turnOff: 'Turn notifications off',
+    test: 'Send a test notification',
+    signOut: 'Sign out',
+  },
+  fr: {
+    loading: 'Chargement…',
+    unsupported: 'Ce navigateur ne propose pas les notifications.',
+    denied: 'Les notifications sont bloquées pour cette appli dans les réglages du navigateur.',
+    off: 'Les notifications sont désactivées sur cet appareil.',
+    on: 'Les notifications sont activées sur cet appareil.',
+    needsInstall: 'Sur iPhone et iPad, les notifications ne marchent qu’une fois l’appli ajoutée à l’écran d’accueil.',
+    turnOn: 'Activer les notifications',
+    turnOff: 'Désactiver les notifications',
+    test: 'Envoyer une notification de test',
+    signOut: 'Se déconnecter',
+  },
+});
 
 function cx(...parts: (string | false | null | undefined)[]): string {
   return parts.filter(Boolean).join(' ');
@@ -192,7 +219,7 @@ export function Spinner(props: { label?: string }) {
   return (
     <div role="status" className="flex items-center justify-center gap-3 py-8 text-muted">
       <span className="size-5 animate-spin rounded-full border-2 border-line border-t-accent" />
-      <span>{props.label ?? 'Chargement…'}</span>
+      <span>{props.label ?? TEXT.loading}</span>
     </div>
   );
 }
@@ -222,13 +249,6 @@ export function Avatar(props: { name: string }) {
   );
 }
 
-const PUSH_TEXT = {
-  unsupported: 'Ce navigateur ne propose pas les notifications.',
-  denied: 'Les notifications sont bloquées pour cette appli dans les réglages du navigateur.',
-  off: 'Les notifications sont désactivées sur cet appareil.',
-  on: 'Les notifications sont activées sur cet appareil.',
-};
-
 /** Ready-made settings block: turn this app's notifications on or off on this device, and try one. */
 export function NotificationSettings() {
   const { state, needsInstall, busy, error, toggle, test } = usePush();
@@ -236,19 +256,15 @@ export function NotificationSettings() {
   return (
     <Card title="Notifications">
       <div className="flex flex-col gap-3">
-        <p>
-          {needsInstall
-            ? 'Sur iPhone et iPad, les notifications ne marchent qu’une fois l’appli ajoutée à l’écran d’accueil.'
-            : PUSH_TEXT[state]}
-        </p>
+        <p>{needsInstall ? TEXT.needsInstall : TEXT[state]}</p>
         {(state === 'on' || state === 'off') && (
           <Button onClick={() => void toggle()} disabled={busy} variant={state === 'on' ? 'secondary' : 'primary'}>
-            {state === 'on' ? 'Désactiver les notifications' : 'Activer les notifications'}
+            {state === 'on' ? TEXT.turnOff : TEXT.turnOn}
           </Button>
         )}
         {state === 'on' && (
           <Button variant="ghost" disabled={busy} onClick={() => void test()}>
-            Envoyer une notification de test
+            {TEXT.test}
           </Button>
         )}
         <ErrorNote>{error}</ErrorNote>
@@ -260,7 +276,7 @@ export function NotificationSettings() {
 export function LogoutButton(props: { className?: string }) {
   return (
     <Button variant="ghost" className={props.className} onClick={() => void logout()}>
-      Se déconnecter
+      {TEXT.signOut}
     </Button>
   );
 }

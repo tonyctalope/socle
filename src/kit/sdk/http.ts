@@ -1,6 +1,11 @@
 // Calls to the platform's API of this app (same origin, session cookie).
+import { words } from './boot.ts';
 
 const API = '/_socle/api';
+const TEXT = words({
+  en: { offline: 'No connection to the server.' },
+  fr: { offline: 'Pas de connexion au serveur.' },
+});
 
 export class ApiError extends Error {
   /** HTTP status, and the machine-readable reason given by the platform or by the app's function. */
@@ -39,7 +44,7 @@ export async function request<T = unknown>(
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
-    throw new ApiError('Pas de connexion au serveur.', 0, 'offline');
+    throw new ApiError(TEXT.offline, 0, 'offline');
   }
   if (response.status === 401) return toLogin();
   if (response.status === 204) return null as T;

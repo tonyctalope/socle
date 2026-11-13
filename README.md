@@ -1,56 +1,60 @@
 # Socle
 
-Une seule plateforme pour les mini-apps de la maison. Socle fournit une fois pour toutes ce que chaque app refaisait
-dans son coin : la connexion, les sessions, les notifications, l'installation sur l'écran d'accueil, le build et la
-base de données. Une app n'apporte plus que ses écrans et sa logique, sous forme de fichiers sources, et il ne reste
-qu'un seul service à tenir à jour.
+One self-hosted platform for the small apps of a household, a team or a club. Socle provides once what every small
+app otherwise rebuilds on its own: sign-in, sessions, notifications, the Home Screen install, the build and the
+database. An app is then only its screens and its logic, sent as source files — written by a person or by an AI
+agent — and there is a single service to keep up to date.
 
-## Où en est le projet
+It is made for a few people who know each other: an allowlist of e-mail addresses decides who gets in.
 
-| Étape | Contenu                                                                                  | État    |
-| ----- | ---------------------------------------------------------------------------------------- | ------- |
-| 1     | Connexion Google, session par sous-domaine, PWA et notifications, app de démo            | fait    |
-| 2     | Build des apps sans `npm install`, base SQLite par app, fonctions serveur en bac à sable | fait    |
-| 3     | Serveurs MCP : un pour créer les apps, un par app ; brouillon, publication, versions     | à faire |
-| 4     | Portage de tasker puis de tricount                                                       | à faire |
-| 5     | Portage de plantes                                                                       | à faire |
+## Status
 
-## Comment ça marche
+| Step | What                                                                                   | State   |
+| ---- | -------------------------------------------------------------------------------------- | ------- |
+| 1    | Sign-in (OpenID Connect), one session per subdomain, PWA and notifications, a demo app | done    |
+| 2    | Apps built without `npm install`, one SQLite database per app, sandboxed functions     | done    |
+| 3    | MCP servers: one to create apps, one per app; drafts, publishing, versions             | next    |
+| 4    | Scheduled functions, files and photos                                                  | planned |
 
-Un seul serveur répond sur deux types d'adresses :
+Until step 3 is there, the only app an instance serves is the built-in demo (`DEMO_APP=1`).
 
-- **Le plan de contrôle** (`CONTROL_URL`, par exemple `https://socle.example.com`) : connexion avec Google, réservée
-  aux adresses de `ALLOWED_EMAILS`, et page d'accueil qui liste les apps.
-- **Une adresse par app** (`https://<app>.<APPS_DOMAIN>`) : chaque app est une origine à part, donc une PWA à part,
-  avec ses propres notifications.
+## How it works
 
-Quand quelqu'un ouvre une app sans être connecté, le navigateur passe par le plan de contrôle, qui renvoie un code à
-usage unique valable une minute pour cette app seulement. L'app échange ce code contre son propre cookie de session.
-Se déconnecter depuis n'importe quelle app déconnecte de toutes sur ce navigateur.
+One server answers on two kinds of addresses:
 
-Sur chaque app, la plateforme sert sous `/_socle/` :
+- **The control plane** (`CONTROL_URL`, for example `https://socle.example.com`): sign-in with your OpenID Connect
+  provider (Google, Microsoft, Keycloak, Authentik…), restricted to the addresses in `ALLOWED_EMAILS`, and a home
+  page that lists the apps.
+- **One address per app** (`https://<app>.<APPS_DOMAIN>`): each app is its own origin, so its own installable PWA,
+  with its own notifications.
 
-| Chemin                         | Rôle                                                                          |
-| ------------------------------ | ----------------------------------------------------------------------------- |
-| `/_socle/vendor/*`             | React, le SDK (`@socle/sdk`) et les composants (`@socle/ui`), servis une fois |
-| `/_socle/api/fn/<nom>`         | Les fonctions serveur de l'app                                                |
-| `/_socle/api/events`           | Le flux qui prévient les pages ouvertes quand une donnée change               |
-| `/_socle/sw.js`                | Le service worker (notifications), le même pour toutes les apps               |
-| `/_socle/manifest.webmanifest` | Le manifeste d'installation, généré à partir de la fiche de l'app             |
-| `/_socle/login`, `/_socle/sso` | La connexion                                                                  |
+When someone opens an app without being signed in, the browser goes through the control plane, which sends back a
+single-use code, valid one minute, for that app only. The app trades the code for its own session cookie. Signing
+out from any app signs out of all of them on that browser.
 
-## Une app
+On every app, the platform serves under `/_socle/`:
 
-Une app est un dossier de fichiers sources. Elle n'installe aucun paquet : tout ce qu'elle importe vient de ses
-propres fichiers ou de la plateforme.
+| Path                           | Role                                                                        |
+| ------------------------------ | --------------------------------------------------------------------------- |
+| `/_socle/vendor/*`             | React, the SDK (`@socle/sdk`) and the components (`@socle/ui`), served once |
+| `/_socle/api/fn/<name>`        | The app's server functions                                                  |
+| `/_socle/api/events`           | The stream that tells open pages when data changed                          |
+| `/_socle/sw.js`                | The service worker (notifications), the same for every app                  |
+| `/_socle/manifest.webmanifest` | The install manifest, generated from the app's description                  |
+| `/_socle/login`, `/_socle/sso` | Sign-on                                                                     |
 
-| Fichier                | Contenu                                                                             |
-| ---------------------- | ----------------------------------------------------------------------------------- |
-| `app.json`             | Nom, description, couleurs                                                          |
-| `web/main.tsx`         | Les écrans, en React et classes Tailwind ; exporte le composant racine              |
-| `server/index.ts`      | Les fonctions serveur : `query` pour lire, `mutation` pour modifier                 |
-| `migrations/NNN_*.sql` | Le schéma de la base de l'app, appliqué une fois par fichier, dans l'ordre des noms |
-| `shared/`              | Ce que les écrans et le serveur ont en commun                                       |
+## An app
+
+An app is a folder of source files. It installs no package: everything it imports comes from its own files or from
+the platform.
+
+| File                   | Content                                                                 |
+| ---------------------- | ----------------------------------------------------------------------- |
+| `app.json`             | Name, description, colors                                               |
+| `web/main.tsx`         | The screens, in React and Tailwind classes; exports the root component  |
+| `server/index.ts`      | The server functions: `query` to read, `mutation` to change             |
+| `migrations/NNN_*.sql` | The schema of the app's database, each file applied once, in name order |
+| `shared/`              | What the screens and the server have in common                          |
 
 ```ts
 // server/index.ts
@@ -62,7 +66,7 @@ export const add = mutation({
   input: v.object({ label: v.string().min(1).max(80) }),
   handler: ({ db, user, notify }, { label }) => {
     db.run('INSERT INTO items (label, author) VALUES (?, ?)', label, user.id);
-    notify('others', { title: `${user.name} a ajouté ${label}` });
+    notify('others', { title: `${user.name} added ${label}` });
   },
 });
 ```
@@ -75,93 +79,107 @@ import { Button, List, ListItem, Page } from '@socle/ui';
 export default function App() {
   const items = useQuery<{ id: number; label: string }[]>('list');
   return (
-    <Page title="Courses">
+    <Page title="Groceries">
       <List>
         {items.data?.map((item) => (
           <ListItem key={item.id}>{item.label}</ListItem>
         ))}
       </List>
-      <Button onClick={() => api.add({ label: 'Pain' })}>Ajouter du pain</Button>
+      <Button onClick={() => api.add({ label: 'Bread' })}>Add bread</Button>
     </Page>
   );
 }
 ```
 
-Chaque fonction s'exécute dans une transaction sur la base de l'app : si elle échoue, rien n'est écrit. Après une
-modification réussie, toutes les pages ouvertes de l'app rechargent ce qu'elles affichent. `src/demo/` est une app
-complète écrite ainsi (`DEMO_APP=1`, servie sur `demo.<APPS_DOMAIN>`) : elle vérifie sur un vrai téléphone la
-connexion, l'installation, les notifications et une liste partagée.
+Each function runs in one transaction on the app's database: if it fails, nothing is written. After a successful
+change, every open page of the app reloads what it shows. `src/demo/` is a complete app written this way
+(`DEMO_APP=1`, served on `demo.<APPS_DOMAIN>`): it checks, on a real phone, sign-in, install, notifications and a
+shared list.
 
-## Sécurité
+## Security
 
-Le plan de contrôle et les apps sont des sous-domaines voisins d'un même domaine. Pour un navigateur, des voisins
-forment un seul « site » : les cookies `SameSite` ne les séparent pas. La séparation repose donc sur quatre règles,
-toutes couvertes par des tests :
+The control plane and the apps are sibling subdomains of one domain. For a browser, siblings are one “site”:
+`SameSite` cookies do not separate them. The separation therefore rests on four rules, all covered by tests:
 
-- **Cookies** `__Host-` uniquement : liés à une seule adresse, illisibles en JavaScript, impossibles à remplacer
-  depuis une adresse voisine.
-- **Origine exacte** : toute requête qui modifie quelque chose est refusée si elle ne vient pas d'une page de la même
-  adresse.
-- **Pages d'app confinées** : une politique de contenu leur interdit d'appeler une autre adresse que la leur, et seul
-  le service worker de la plateforme peut être enregistré.
-- **Sessions par adresse** : la session d'une app n'est acceptée nulle part ailleurs.
+- **`__Host-` cookies only**: tied to a single address, unreadable from JavaScript, impossible to replace from a
+  sibling address.
+- **Exact origin**: any request that changes something is refused unless it comes from a page of the same address.
+- **Confined app pages**: a content security policy forbids them from calling any address but their own, and only
+  the platform's service worker can be registered.
+- **Sessions per address**: the session of an app is accepted nowhere else.
 
-Limites connues : une app peut toujours envoyer ses propres données ailleurs en redirigeant le navigateur, poser des
-cookies visibles par les autres services du domaine parent, et déconnecter la personne de toutes les apps.
+Known limits: an app can still send its own data elsewhere by navigating the browser away, set cookies visible to
+the other services of the parent domain, and sign the person out of every app.
 
-Le code des apps est écrit par des agents : la plateforme le traite comme hostile.
+App code may be written by agents: the platform treats it as hostile.
 
-- **Deux conteneurs** : `web` détient les secrets et n'exécute jamais de code d'app. `runner` construit les apps et
-  exécute leurs fonctions, sans réseau, sans secret et sans accès à la base de la plateforme.
-- **Bac à sable** : les fonctions serveur tournent dans un interpréteur JavaScript compilé en WebAssembly, qui n'a ni
-  fichiers, ni réseau, ni processus. Chaque appel reçoit un interpréteur neuf.
-- **Une base par app** : une fonction ne peut nommer que les tables de sa propre app. Une lecture ne peut pas écrire.
-- **Limites** de temps, de mémoire et de taille : un appel qui dépasse son délai est arrêté en tuant le processus qui
-  l'exécute, et sa transaction est annulée. Chaque appel a sa propre mémoire plafonnée.
-- **Partage** : une app ne peut occuper qu'une partie des processus du runner, les autres apps continuent de
-  répondre pendant qu'elle est bloquée.
-- **Build sans installation** : le code est assemblé en mémoire à partir des fichiers envoyés ; un import de paquet
-  ou de fichier extérieur est une erreur de build.
+- **Two containers**: `web` holds the secrets and never executes app code. `runner` builds the apps and runs their
+  functions, with no network, no secret and no access to the platform's database.
+- **Sandbox**: server functions run in a JavaScript interpreter compiled to WebAssembly, which has no file, network
+  or process API. Every call gets a fresh interpreter.
+- **One database per app**: a function can only name the tables of its own app. A read cannot write.
+- **Limits** on time, memory and size: a call that outlives its deadline is stopped by killing the process that
+  runs it, and its transaction is rolled back. Every call has its own capped memory.
+- **Sharing**: one app can only occupy part of the runner's processes; the other apps keep answering while it is
+  stuck.
+- **Build without install**: the code is assembled in memory from the files that were sent; importing a package or
+  a file from outside is a build error.
 
-## Développement
+Socle is young and has not been audited by a third party. Run it for people you trust.
 
-Node 26 exécute les sources TypeScript directement, sans étape de build.
+## Development
+
+Node 26 runs the TypeScript sources directly, without a build step.
 
 ```bash
 npm install
-cp .env.example .env    # puis activer le bloc « Local development »
-npm run dev             # http://socle.localhost:8787 et http://demo.apps.localhost:8787
+cp .env.example .env    # then enable the "Local development" block
+npm run dev             # http://socle.localhost:8787 and http://demo.apps.localhost:8787
 npm test
 npm run typecheck
 npm run format
 ```
 
-Les navigateurs résolvent `*.localhost` tout seuls. `DEV_LOGIN=1` remplace Google par une page qui liste les adresses
-autorisées ; le serveur refuse de démarrer avec cette option hors de `localhost`. En développement, le serveur lance
-lui-même les processus du runner.
+Browsers resolve `*.localhost` by themselves. `DEV_LOGIN=1` replaces the sign-in provider with a page that lists
+the allowed addresses; the server refuses to start with it outside `localhost`. In development the server starts
+the runner's processes itself.
 
-## Déploiement
+## Deployment
 
-L'image `ghcr.io/tonyctalope/socle` est construite par la CI (amd64 et arm64). `compose.yaml` donne un exemple
-derrière Traefik. Il faut :
+The image `ghcr.io/tonyctalope/socle` is built by CI (amd64 and arm64). You need:
 
-1. Deux entrées DNS vers le serveur : celle du plan de contrôle et un joker `*.<APPS_DOMAIN>`.
-2. Un certificat joker pour `*.<APPS_DOMAIN>` (défi DNS-01).
-3. Un client OAuth Google de type « application Web », avec `<CONTROL_URL>/auth/google/callback` comme URI de
-   redirection autorisée.
-4. Un fichier `.env` à côté de `compose.yaml` (voir `.env.example`).
-5. Les dossiers de données, créés avant le premier démarrage par l'utilisateur qui fait tourner les conteneurs
-   (`SOCLE_UID`) : `mkdir -p data/apps data/run`.
+1. Two DNS entries pointing at the server: the control plane's, and a wildcard `*.<APPS_DOMAIN>`.
+2. A reverse proxy that terminates TLS, with a certificate for the control plane and a wildcard certificate for
+   `*.<APPS_DOMAIN>` (DNS-01 challenge). `compose.yaml` is an example behind Traefik; any proxy that forwards the
+   `Host` header unchanged works.
+3. A client at your OpenID Connect provider (“web application”), with `<CONTROL_URL>/auth/callback` as authorized
+   redirect URI. The provider must return a verified e-mail address.
+4. A `.env` file next to `compose.yaml` (see `.env.example`).
+5. The data folders, created before the first start by the user who runs the containers (`SOCLE_UID`):
+   `mkdir -p data/apps data/run`.
 
-`compose.yaml` démarre deux conteneurs à partir de la même image : `socle` (web) et `socle-runner`, qui n'a pas de
-réseau et ne reçoit pas le fichier `.env`.
+`compose.yaml` starts two containers from the same image: `socle` (web) and `socle-runner`, which has no network
+and does not receive the `.env` file.
 
-La base de la plateforme est dans `data/socle.db`, celle de chaque app dans `data/apps/<app>/live.db`. Une copie de
-chacune est écrite chaque nuit (`data/backups/` et `data/apps/<app>/backups/`, 14 conservées).
+Settings worth knowing:
 
-## Mises à jour
+| Variable         | Role                                                               | Default |
+| ---------------- | ------------------------------------------------------------------ | ------- |
+| `ALLOWED_EMAILS` | Who can sign in                                                    | —       |
+| `APP_LOCALE`     | Language of the platform's own pages and messages (`en`, `fr`)     | `en`    |
+| `APP_TIMEZONE`   | Where the members live: what “today” means for the apps            | `UTC`   |
+| `OIDC_NAME`      | What the sign-in button calls the provider (“Sign in with Google”) | —       |
+| `DEMO_APP`       | Serves the demo app on `demo.<APPS_DOMAIN>`                        | off     |
 
-- Dependabot ouvre chaque semaine une demande groupée ; les mises à jour mineures et correctives sont fusionnées
-  automatiquement quand la CI passe.
-- La CI reconstruit l'image chaque nuit, ce qui embarque aussi les correctifs de l'image de base.
-- Le job « Known vulnerabilities » échoue dès qu'une dépendance de production a une alerte haute ou critique.
+The platform's database is `data/socle.db`, each app's is `data/apps/<app>/live.db`. A copy of each is written every
+night (`data/backups/` and `data/apps/<app>/backups/`, 14 kept).
+
+## Updates
+
+- Dependabot opens one grouped pull request a week; minor and patch updates are merged automatically once CI passes.
+- CI rebuilds the image every night, which also picks up the fixes of the base image.
+- The “Known vulnerabilities” job fails as soon as a production dependency has a high or critical advisory.
+
+## License
+
+MIT.

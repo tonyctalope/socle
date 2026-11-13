@@ -22,9 +22,9 @@ a:focus-visible,button:focus-visible,.button:focus-visible{outline:3px solid var
  * `iconPrefix` is where the platform icons live on the host that renders the page:
  * /icons on the control plane, /_socle/icons on an app host.
  */
-export function page(title: string, body: unknown, iconPrefix = '/icons') {
+export function page(lang: string, title: string, body: unknown, iconPrefix = '/icons') {
   return html`<!doctype html>
-    <html lang="fr">
+    <html lang="${lang}">
       <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -40,12 +40,14 @@ export function page(title: string, body: unknown, iconPrefix = '/icons') {
 }
 
 export function messagePage(
+  lang: string,
   title: string,
   message: string,
   link?: { href: string; label: string },
   iconPrefix = '/icons',
 ) {
   return page(
+    lang,
     title,
     html`<img class="logo" src="${iconPrefix}/icon-192.png" alt="" />
       <h1>${title}</h1>

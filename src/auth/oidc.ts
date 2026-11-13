@@ -1,12 +1,15 @@
 import * as oidc from 'openid-client';
 import type { Config } from '../config.ts';
+import { translator } from '../i18n.ts';
 import { safeEqual } from '../lib/crypto.ts';
 
 /** Holds a login in progress (see `Pending`) in the browser that started it. */
 export const LOGIN_COOKIE = 'socle_login';
 export const LOGIN_TTL_SEC = 600;
+/** Where the provider sends the browser back: the redirect URI to register with it is CONTROL_URL + this path. */
+export const CALLBACK_PATH = '/auth/callback';
 
-export interface GoogleIdentity {
+export interface Identity {
   sub: string;
   email: string;
   emailVerified: boolean;
@@ -16,11 +19,11 @@ export interface GoogleIdentity {
 export interface IdentityProvider {
   /**
    * Starts a login: the URL to send the browser to, and the value to keep in the
-   * login cookie until Google sends the browser back.
+   * login cookie until the provider sends the browser back.
    */
   start(nextPath: string): Promise<{ url: string; pending: string }>;
   /** Completes it from the callback URL and the login cookie; throws on any failure. */
-  finish(callbackUrl: URL, pending: string): Promise<{ identity: GoogleIdentity; nextPath: string }>;
+  finish(callbackUrl: URL, pending: string): Promise<{ identity: Identity; nextPath: string }>;
 }
 
 export class LoginError extends Error {}
@@ -59,14 +62,16 @@ function decodePending(value: string): Pending | null {
   }
 }
 
-export function createGoogleProvider(config: Config, options: { allowInsecure?: boolean } = {}): IdentityProvider {
+/** Sign-in with any OpenID Connect provider (Google, Microsoft, Keycloak, Authentik…), found by discovery. */
+export function createOidcProvider(config: Config, options: { allowInsecure?: boolean } = {}): IdentityProvider {
+  const t = translator(config.locale);
   let discovered: Promise<oidc.Configuration> | null = null;
   const configuration = () => {
     discovered ??= oidc
       .discovery(
-        new URL(config.google.issuer),
-        config.google.clientId,
-        config.google.clientSecret,
+        new URL(config.oidc.issuer),
+        config.oidc.clientId,
+        config.oidc.clientSecret,
         undefined,
         options.allowInsecure ? { execute: [oidc.allowInsecureRequests] } : undefined,
       )
@@ -76,7 +81,7 @@ export function createGoogleProvider(config: Config, options: { allowInsecure?: 
       });
     return discovered;
   };
-  const redirectUri = `${config.controlOrigin}/auth/google/callback`;
+  const redirectUri = `${config.controlOrigin}${CALLBACK_PATH}`;
 
   return {
     async start(nextPath) {
@@ -102,7 +107,7 @@ export function createGoogleProvider(config: Config, options: { allowInsecure?: 
       const pending = decodePending(pendingValue);
       const state = callbackUrl.searchParams.get('state') ?? '';
       if (!pending || pending.expires <= Date.now() || !safeEqual(pending.state, state)) {
-        throw new LoginError('La tentative de connexion a expiré, recommence.');
+        throw new LoginError(t('This sign-in attempt is no longer valid. Start again.'));
       }
       const server = await configuration();
       const tokens = await oidc.authorizationCodeGrant(server, callbackUrl, {
@@ -112,7 +117,9 @@ export function createGoogleProvider(config: Config, options: { allowInsecure?: 
         idTokenExpected: true,
       });
       const claims = tokens.claims();
-      if (!claims || typeof claims.email !== 'string') throw new LoginError('Google n’a pas fourni d’adresse e-mail.');
+      if (!claims || typeof claims.email !== 'string') {
+        throw new LoginError(t('The sign-in service did not provide an e-mail address.'));
+      }
       return {
         identity: {
           sub: claims.sub,

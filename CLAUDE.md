@@ -1,8 +1,12 @@
 # CLAUDE.md
 
-Socle is the single platform behind the household's mini-apps: it owns sign-in, sessions, notifications, the PWA
-plumbing, the build and the database once, so that an app is only its own screens and logic. Apps are **written by
-agents** and arrive as a map of source files: treat their code as hostile.
+Socle is one self-hosted platform behind the small apps of a household, a team or a club: it owns sign-in,
+sessions, notifications, the PWA plumbing, the build and the database once, so that an app is only its own screens
+and logic. Apps are **written by agents** and arrive as a map of source files: treat their code as hostile.
+
+It is a public project meant to be reused by others: nothing in the repository may be specific to one
+installation (names, domains, a language, a sign-in provider). Code, comments, docs and commit messages are in
+English; what the platform itself says to people goes through `src/i18n.ts` (server) or `words()` (kit).
 
 Two processes, one image:
 
@@ -18,14 +22,13 @@ their own, server or browser side. Keep the platform's own tree small (10 produc
 
 ```bash
 npm run dev          # node --watch, reads .env (see .env.example for the localhost settings)
-npm test             # node --test (test/*.test.ts), no network except a fake Google on 127.0.0.1
+npm test             # node --test (test/*.test.ts), no network except a fake sign-in provider on 127.0.0.1
 npm run typecheck    # tsc, no emit
 npm run format       # prettier
 scripts/smoke-test.sh <image>   # what CI runs against the built image
 ```
 
-Use Node 26 (`engines`). On Tony's machine `/usr/bin/node` is v22: prefix
-`PATH=$HOME/.local/share/mise/installs/node/26.13.0/bin:$PATH`. Docker needs sudo there, so images are built by CI.
+Use Node 26 (`engines`); with mise: `mise exec node@26 -- npm test`.
 
 Local run: `CONTROL_URL=http://socle.localhost:8787 APPS_DOMAIN=apps.localhost NODE_ENV=development DEV_LOGIN=1
 DEMO_APP=1`, then open `http://demo.apps.localhost:8787/` (browsers resolve `*.localhost` themselves). Without
@@ -40,14 +43,17 @@ the sandbox load: `src/kit`, `src/demo`).
   only gets `/healthz`. URLs are always built from the configuration (`appOrigin`), never from a request's Host.
 - The server runs **TypeScript directly** (Node type stripping): only erasable syntax (no enums, no parameter
   properties, no namespaces), relative imports end in `.ts`, type-only imports use `import type`.
-- `src/control/` — Google sign-in (`/auth/google/*`), the home page, `/sso/start`. Pages are server-rendered with
+- `src/control/` — sign-in (`/auth/start`, `/auth/callback`), the home page, `/sso/start`. Pages are server-rendered with
   `hono/html` (auto-escaping) and carry **no JavaScript**.
 - `src/apphost/` — everything on an app host. The platform owns `/_socle/*` (sign-on, API, service worker, SDK,
   manifest, icons); the rest of the path space belongs to the app. The platform also writes the HTML document
   (`shell.ts`): apps never write `<head>`.
 - `src/auth/` — `sessions.ts` (one row per browser and host, `scope` = `''` for the control plane or the app's
   slug, `family` = one sign-in on one browser), `sso.ts` (one-time codes from the control plane to an app host; the
-  flow is described at the top of the file), `google.ts` (OIDC with openid-client).
+  flow is described at the top of the file), `oidc.ts` (any OpenID Connect provider, found by discovery with openid-client; `OIDC_ISSUER`).
+- `src/i18n.ts` — the platform's own words. The English sentence is the key (`t('Sign out')`), `APP_LOCALE`
+  picks the table (`en`, `fr`); a test checks that every sentence the server says has its translation. The kit
+  does the same in the browser with `words({ en, fr })` from `@socle/sdk`. Apps write their own text.
 - `src/push/` — Web Push, one subscription per browser **and per app** (each app is its own origin).
 - `src/client/sw.js` — the service worker (notifications), served as-is at `/_socle/sw.js`.
 - `src/kit/` — what apps import in the browser: `sdk/` (`@socle/sdk`: `api`, `useQuery`, `useMe`, `usePush`,
@@ -72,7 +78,7 @@ A map of path → text (`src/runner/build/files.ts` checks its shape):
   May import `react`, `react-dom`, `@socle/sdk`, `@socle/ui`, and its own files in `web/` and `shared/`. Styling is
   Tailwind classes (+ optional `web/style.css`).
 - `server/index.ts` — exports `query(...)` and `mutation(...)` from `@socle/server`; imports only `server/` and
-  `shared/`. A function gets `{ db, user, members, now, today, notify }` and its input (checked against `v.…`).
+  `shared/`. A function gets `{ db, user, members, now, today, locale, notify }` and its input (checked against `v.…`).
 - `migrations/NNN_name.sql` — applied once each, in name order, all new ones in one transaction.
 
 Browser side, `useQuery('name', input)` reads a query and refetches it whenever any mutation of the app succeeds
@@ -96,7 +102,7 @@ Browser side, `useQuery('name', input)` reads a query and refetches it whenever 
 
 ## Invariants (security)
 
-The control plane and every app are **sibling subdomains of one registrable domain** (Tony's decision). Browsers
+The control plane and every app are **sibling subdomains of one registrable domain** (so that one domain is enough to run an instance). Browsers
 treat siblings as the same site: SameSite cookies do not separate them, and a page of one app can set cookies for
 the parent domain. Everything below exists because of that; none of it is optional.
 
@@ -193,7 +199,7 @@ and anyone can learn which app names exist (public manifest).
 
 `test/helpers.ts` builds an in-memory platform with two apps (`demo`, published from fake build output, and `notes`,
 unpublished) and a `Browser` with one cookie jar per host that follows redirects from host to host. `sso.test.ts`
-and `isolation.test.ts` pin the step 1 invariants; `google-login.test.ts` runs a fake OIDC provider.
+and `isolation.test.ts` pin the step 1 invariants; `login.test.ts` runs a fake OIDC provider.
 
 `sandbox.test.ts` is the list of things an app's server code must not be able to do (other apps' data, files,
 endless loops, memory, recursion, forged answers); `runner.test.ts` covers the worker processes and the kills;
@@ -213,6 +219,6 @@ the containers by hand instead of from `compose.yaml`.
 2. **Done here**: the runner (build without install, server functions in a sandbox, one database per app,
    migrations, live updates), the SDK and UI kit, the demo app on that pipeline.
 3. MCP: one builder server on the control plane and one MCP server per app that offers the functions marked
-   `tool` (their input schemas already come out of the build); drafts with their own database that Tony
+   `tool` (their input schemas already come out of the build); drafts with their own database that an administrator
    publishes, versions, rollback; an app log the agent can read; per-app icons and access lists.
-4. Port tasker, then tricount (needs scheduled functions: `user` is null for those). 5. Port plantes (photos).
+4. Scheduled functions (`user` is null for those), then files and photos.

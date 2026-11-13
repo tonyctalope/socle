@@ -96,4 +96,7 @@ export const MIGRATIONS: readonly string[] = [
   CREATE INDEX app_versions_assets ON app_versions(app, asset_hash);
   ALTER TABLE apps ADD COLUMN live_version INTEGER REFERENCES app_versions(id) ON DELETE SET NULL;
   `,
+  /* 3 — sign-in is any OpenID Connect provider: the column holds its `sub` claim */ `
+  ALTER TABLE users RENAME COLUMN google_sub TO subject;
+  `,
 ];

@@ -15,7 +15,7 @@ import { startRunner } from '../src/runner/supervisor.ts';
 
 const LIMITS: Limits = { ...DEFAULT_LIMITS, callMs: 300, killGraceMs: 300, guestMemory: 16 * 1024 * 1024 };
 const dir = mkdtempSync(path.join(tmpdir(), 'socle-runner-'));
-const TONY = { id: 1, name: 'Tony' };
+const BOB = { id: 1, name: 'Bob' };
 
 const SOURCE = {
   'app.json': '{ "name": "Notes" }',
@@ -62,8 +62,8 @@ async function deploy(runner: Runner, app: string) {
       bundleHash,
       fn,
       inputJson: JSON.stringify(input),
-      user: TONY,
-      members: [TONY],
+      user: BOB,
+      members: [BOB],
       now: Date.now(),
       today: '2027-01-15',
     });
@@ -114,7 +114,7 @@ describe('the runner, as the web process uses it', () => {
     }
     // The interrupted write left nothing, and the app works again at once.
     assert.equal(valueOf(await notes.call('count')), 1);
-    assert.equal(valueOf(await notes.call('add', { body: 'après' })), 2);
+    assert.equal(valueOf(await notes.call('add', { body: 'after' })), 2);
   });
 
   it('kills a worker whose memory grows past its allowance, whatever is holding it', async () => {

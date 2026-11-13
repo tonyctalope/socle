@@ -41,7 +41,6 @@ self.addEventListener('push', (event) => {
       badge: '/_socle/icons/badge-96.png',
       tag: typeof data.tag === 'string' && data.tag ? data.tag : 'socle',
       renotify: true,
-      lang: 'fr',
       data: { url: localPath(data.url) },
     }),
   );

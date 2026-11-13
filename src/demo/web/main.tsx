@@ -2,7 +2,7 @@
 // sign-in, the home-screen install, the notifications, and server functions whose
 // results stay in sync between phones.
 import { useState, type FormEvent } from 'react';
-import { api, install, useMe, useQuery } from '@socle/sdk';
+import { api, install, useMe, useQuery, words } from '@socle/sdk';
 import {
   Avatar,
   Button,
@@ -17,6 +17,38 @@ import {
   Page,
   Spinner,
 } from '@socle/ui';
+
+const TEXT = words({
+  en: {
+    hello: (name: string) => `Hello ${name}`,
+    signedIn: (app: string, host: string) => `You are signed in to “${app}” on ${host}.`,
+    install: 'Install',
+    standalone: 'The app is open from the Home Screen.',
+    inBrowser: 'The app is open in the browser. To install it, choose “Add to Home Screen” in the browser menu.',
+    sharedList: 'Shared list',
+    sharedHelp: '{TEXT.sharedHelp}',
+    placeholder: 'Bread, for instance',
+    toAdd: 'To add',
+    add: 'Add',
+    empty: 'The list is empty',
+    remove: 'Remove',
+  },
+  fr: {
+    hello: (name: string) => `Bonjour ${name}`,
+    signedIn: (app: string, host: string) => `Vous êtes connecté à « ${app} » sur ${host}.`,
+    install: 'Installation',
+    standalone: 'L’appli est ouverte depuis l’écran d’accueil.',
+    inBrowser:
+      'L’appli est ouverte dans le navigateur. Pour l’installer, choisissez « Ajouter à l’écran d’accueil » dans le menu du navigateur.',
+    sharedList: 'Liste partagée',
+    sharedHelp: 'Ce que vous ajoutez ici apparaît aussitôt sur les autres téléphones, qui reçoivent une notification.',
+    placeholder: 'Du pain, par exemple',
+    toAdd: 'À ajouter',
+    add: 'Ajouter',
+    empty: 'La liste est vide',
+    remove: 'Supprimer',
+  },
+});
 
 interface Item {
   id: number;
@@ -43,33 +75,36 @@ function SharedList() {
   };
 
   return (
-    <Card title="Liste partagée">
+    <Card title={TEXT.sharedList}>
       <div className="flex flex-col gap-3">
-        <p className="text-sm text-muted">
-          Ce que tu ajoutes ici apparaît aussitôt sur les autres téléphones, qui reçoivent une notification.
-        </p>
+        <p className="text-sm text-muted">{TEXT.sharedHelp}</p>
         <form onSubmit={submit} className="flex gap-2">
           <Input
             value={label}
             maxLength={80}
-            placeholder="Du pain, par exemple"
-            aria-label="À ajouter"
+            placeholder={TEXT.placeholder}
+            aria-label={TEXT.toAdd}
             onChange={(event) => setLabel(event.target.value)}
           />
-          <Button type="submit">Ajouter</Button>
+          <Button type="submit">{TEXT.add}</Button>
         </form>
         <ErrorNote>{error ?? items.error?.message}</ErrorNote>
         {items.loading ? (
           <Spinner />
         ) : !items.data?.length ? (
-          <Empty title="La liste est vide" />
+          <Empty title={TEXT.empty} />
         ) : (
           <List>
             {items.data.map((item) => (
               <ListItem
                 key={item.id}
                 end={
-                  <Button small variant="ghost" aria-label="Supprimer" onClick={() => run(api.remove({ id: item.id }))}>
+                  <Button
+                    small
+                    variant="ghost"
+                    aria-label={TEXT.remove}
+                    onClick={() => run(api.remove({ id: item.id }))}
+                  >
                     ✕
                   </Button>
                 }
@@ -98,16 +133,10 @@ function SharedList() {
 export default function App() {
   const { user, app } = useMe();
   return (
-    <Page title={`Bonjour ${user.name}`}>
-      <p className="text-muted">
-        Tu es connecté à « {app.name} » sur {location.host}.
-      </p>
-      <Card title="Installation">
-        <p>
-          {install.standalone()
-            ? 'L’appli est ouverte depuis l’écran d’accueil.'
-            : 'L’appli est ouverte dans le navigateur. Pour l’installer, choisis « Ajouter à l’écran d’accueil » dans le menu du navigateur.'}
-        </p>
+    <Page title={TEXT.hello(user.name)}>
+      <p className="text-muted">{TEXT.signedIn(app.name, location.host)}</p>
+      <Card title={TEXT.install}>
+        <p>{install.standalone() ? TEXT.standalone : TEXT.inBrowser}</p>
       </Card>
       <NotificationSettings />
       <SharedList />

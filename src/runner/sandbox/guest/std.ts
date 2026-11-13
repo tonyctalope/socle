@@ -118,6 +118,7 @@ interface CallContext {
   members: { id: number; name: string }[];
   now: number;
   today: string;
+  locale: string;
 }
 
 function invoke(name: string, contextJson: string, inputJson: string): string | Promise<string> {
@@ -136,9 +137,11 @@ function invoke(name: string, contextJson: string, inputJson: string): string | 
     user: given.user,
     /** Everyone who can open the app: [{ id, name }]. */
     members: given.members,
-    /** The time of the call in milliseconds, and today's date (YYYY-MM-DD) where the household lives. */
+    /** The time of the call in milliseconds, and today's date (YYYY-MM-DD) in the instance's timezone. */
     now: given.now,
     today: given.today,
+    /** The language the instance is set to ("en", "fr"…). */
+    locale: given.locale,
     /** Sends a notification once the call has succeeded. `to`: a user id, a list of ids, "others" or "all". */
     notify(to: unknown, message: unknown) {
       effects.push({ type: 'notify', to, message });

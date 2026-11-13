@@ -31,9 +31,11 @@ declare module '@socle/server' {
     user: Member;
     /** Everyone who can open the app. */
     members: Member[];
-    /** Time of the call (epoch milliseconds) and today's date (YYYY-MM-DD) where the household lives. */
+    /** Time of the call (epoch milliseconds) and today's date (YYYY-MM-DD) in the instance's timezone (APP_TIMEZONE). */
     now: number;
     today: string;
+    /** The language the instance is set to ("en", "fr"…): the same value as `locale` in `@socle/sdk`. */
+    locale: string;
     /** Sends a notification once the mutation has succeeded. */
     notify(to: number | number[] | 'others' | 'all', message: { title: string; body?: string; url?: string }): void;
   }

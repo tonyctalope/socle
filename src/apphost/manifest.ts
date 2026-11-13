@@ -1,7 +1,7 @@
 import type { AppRow } from '../apps/registry.ts';
 
 /** Web app manifest of one app. Each app is its own origin, so id, scope and start URL are all "/". */
-export function appManifest(app: AppRow): Record<string, unknown> {
+export function appManifest(app: AppRow, lang: string): Record<string, unknown> {
   const icon = (file: string, size: number, purpose: 'any' | 'maskable') => ({
     src: `/_socle/icons/${file}`,
     sizes: `${size}x${size}`,
@@ -13,7 +13,7 @@ export function appManifest(app: AppRow): Record<string, unknown> {
     name: app.name,
     short_name: app.name,
     description: app.description,
-    lang: 'fr',
+    lang,
     dir: 'ltr',
     start_url: '/',
     scope: '/',

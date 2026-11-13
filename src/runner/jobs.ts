@@ -65,7 +65,7 @@ export function timeoutOf(job: Job, limits: Limits): number {
   }
 }
 
-/** The app a database belongs to: "tricount/live" → "tricount". */
+/** The app a database belongs to: "notes/live" → "notes". */
 const appOf = (database: string): string => database.split('/')[0] ?? '';
 
 export interface Executor {

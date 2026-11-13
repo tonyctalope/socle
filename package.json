@@ -1,9 +1,9 @@
 {
   "name": "socle",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "Une seule plateforme pour les mini-apps de la maison : connexion, sessions, notifications et PWA fournies une fois pour toutes.",
+  "description": "One self-hosted platform for the small apps of a household or a team: sign-in, sessions, notifications, PWA, build and database provided once; apps are just source files, written by people or by agents.",
   "license": "MIT",
   "engines": {
     "node": ">=26"

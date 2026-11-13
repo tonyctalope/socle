@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { createApp } from '../src/app.ts';
 import { get, run } from '../src/db/database.ts';
-import { Browser, CHLOE, CONTROL, DEMO, NOTES, setup, signIn, testConfig, TONY } from './helpers.ts';
+import { Browser, ALICE, CONTROL, DEMO, NOTES, setup, signIn, testConfig, BOB } from './helpers.ts';
 
 /** Starts sign-on on an app host and stops at the control plane's redirect back, without following it. */
 async function codeFor(browser: Browser, appOrigin: string): Promise<string> {
@@ -33,19 +33,19 @@ describe('sign-on from the control plane to an app host', () => {
     assert.equal(atControl.searchParams.get('next'), '/depenses?mois=11');
     assert.equal(atControl.searchParams.get('state'), browser.cookie(DEMO, '__Host-socle_sso'));
 
-    // Not signed in on the control plane: Google first, and the way back is kept server-side.
+    // Not signed in on the control plane: the provider first, and the way back is kept server-side.
     const start = await browser.request(atControl.href);
     assert.equal(start.status, 302);
-    const google = new URL(start.headers.get('location')!, CONTROL);
-    assert.equal(google.pathname, '/auth/google/start');
-    assert.match(google.searchParams.get('next')!, /^\/sso\/start\?app=demo&state=/);
+    const signInUrl = new URL(start.headers.get('location')!, CONTROL);
+    assert.equal(signInUrl.pathname, '/auth/start');
+    assert.match(signInUrl.searchParams.get('next')!, /^\/sso\/start\?app=demo&state=/);
     ctx.cleanup();
   });
 
   it('gives a signed-in member a session on the app host, on the page they asked for', async () => {
     const ctx = setup();
     const browser = new Browser(ctx.app);
-    signIn(ctx, browser, TONY);
+    signIn(ctx, browser, BOB);
     const { response, url, hops } = await browser.navigate(`${DEMO}/depenses?mois=11`);
     assert.equal(response.status, 200);
     assert.equal(url, `${DEMO}/depenses?mois=11`);
@@ -58,7 +58,7 @@ describe('sign-on from the control plane to an app host', () => {
     const me = await browser.fetch(`${DEMO}/_socle/api/me`);
     assert.equal(me.status, 200);
     const body = (await me.json()) as { user: Record<string, unknown>; app: { slug: string } };
-    assert.deepEqual(body.user, { id: body.user.id, name: 'tony' }); // no e-mail address for apps
+    assert.deepEqual(body.user, { id: body.user.id, name: 'bob' }); // no e-mail address for apps
     assert.equal(body.app.slug, 'demo');
     assert.equal(browser.cookie(DEMO, '__Host-socle_sso'), undefined); // one-shot state cookie cleared
     ctx.cleanup();
@@ -67,7 +67,7 @@ describe('sign-on from the control plane to an app host', () => {
   it('only sets host-only, HttpOnly, Secure cookies', async () => {
     const ctx = setup();
     const browser = new Browser(ctx.app);
-    signIn(ctx, browser, TONY);
+    signIn(ctx, browser, BOB);
     await browser.navigate(`${DEMO}/`);
     await browser.navigate(`${NOTES}/`);
     assert.ok(browser.setCookies.length >= 4);
@@ -85,46 +85,46 @@ describe('sign-on from the control plane to an app host', () => {
 
   it('accepts a code once, only on its host, only in the browser that asked, and only for a minute', async () => {
     const ctx = setup();
-    const tony = new Browser(ctx.app);
-    signIn(ctx, tony, TONY);
+    const bob = new Browser(ctx.app);
+    signIn(ctx, bob, BOB);
 
     // Once.
-    const used = await codeFor(tony, DEMO);
-    const state = tony.cookie(DEMO, '__Host-socle_sso')!;
-    assert.equal((await tony.request(`${DEMO}/_socle/sso?code=${used}`)).status, 303);
-    tony.deleteCookie(DEMO, '__Host-socle_app');
-    tony.setCookie(DEMO, '__Host-socle_sso', state);
-    assert.equal((await tony.request(`${DEMO}/_socle/sso?code=${used}`)).status, 400);
+    const used = await codeFor(bob, DEMO);
+    const state = bob.cookie(DEMO, '__Host-socle_sso')!;
+    assert.equal((await bob.request(`${DEMO}/_socle/sso?code=${used}`)).status, 303);
+    bob.deleteCookie(DEMO, '__Host-socle_app');
+    bob.setCookie(DEMO, '__Host-socle_sso', state);
+    assert.equal((await bob.request(`${DEMO}/_socle/sso?code=${used}`)).status, 400);
 
     // Only on its host: a code issued for demo is refused by notes, even with notes' own state cookie.
-    const forDemo = await codeFor(tony, DEMO);
-    await tony.request(`${NOTES}/_socle/login?next=/`);
-    assert.equal((await tony.request(`${NOTES}/_socle/sso?code=${forDemo}`)).status, 400);
+    const forDemo = await codeFor(bob, DEMO);
+    await bob.request(`${NOTES}/_socle/login?next=/`);
+    assert.equal((await bob.request(`${NOTES}/_socle/sso?code=${forDemo}`)).status, 400);
     // …and that failed attempt burned it.
-    tony.setCookie(DEMO, '__Host-socle_sso', tony.cookie(DEMO, '__Host-socle_sso') ?? state);
-    assert.equal((await tony.request(`${DEMO}/_socle/sso?code=${forDemo}`)).status, 400);
+    bob.setCookie(DEMO, '__Host-socle_sso', bob.cookie(DEMO, '__Host-socle_sso') ?? state);
+    assert.equal((await bob.request(`${DEMO}/_socle/sso?code=${forDemo}`)).status, 400);
 
     // Only in the browser that started the flow: someone made to open the link gets nothing.
-    const leaked = await codeFor(tony, DEMO);
+    const leaked = await codeFor(bob, DEMO);
     const victim = new Browser(ctx.app);
     const refused = await victim.request(`${DEMO}/_socle/sso?code=${leaked}`);
     assert.equal(refused.status, 400);
     assert.equal(victim.cookie(DEMO, '__Host-socle_app'), undefined);
     await victim.request(`${DEMO}/_socle/login?next=/`); // a state cookie of its own does not help
-    const fresh = await codeFor(tony, DEMO);
+    const fresh = await codeFor(bob, DEMO);
     assert.equal((await victim.request(`${DEMO}/_socle/sso?code=${fresh}`)).status, 400);
 
     // Only for a minute.
-    const late = await codeFor(tony, DEMO);
+    const late = await codeFor(bob, DEMO);
     ctx.clock.now = new Date(ctx.clock.now.getTime() + 61_000);
-    assert.equal((await tony.request(`${DEMO}/_socle/sso?code=${late}`)).status, 400);
+    assert.equal((await bob.request(`${DEMO}/_socle/sso?code=${late}`)).status, 400);
     ctx.cleanup();
   });
 
   it('lets two tabs sign in at the same time', async () => {
     const ctx = setup();
     const browser = new Browser(ctx.app);
-    signIn(ctx, browser, TONY);
+    signIn(ctx, browser, BOB);
     // Two tabs restored together: each starts its own sign-on, the second state replaces the first.
     const first = await browser.request(`${DEMO}/_socle/login?next=/a`);
     const second = await browser.request(`${DEMO}/_socle/login?next=/b`);
@@ -138,20 +138,20 @@ describe('sign-on from the control plane to an app host', () => {
     assert.equal(a.status, 303);
     assert.equal(a.headers.get('location'), '/a');
     // A signed-in browser gains nothing from someone else's code: no session change, no chosen landing page.
-    const chloe = new Browser(ctx.app);
-    signIn(ctx, chloe, CHLOE);
-    const hers = await codeFor(chloe, DEMO);
+    const alice = new Browser(ctx.app);
+    signIn(ctx, alice, ALICE);
+    const hers = await codeFor(alice, DEMO);
     const swapped = await browser.request(`${DEMO}/_socle/sso?code=${hers}`);
     assert.equal(swapped.headers.get('location'), '/');
     const me = (await (await browser.fetch(`${DEMO}/_socle/api/me`)).json()) as { user: { name: string } };
-    assert.equal(me.user.name, 'tony');
+    assert.equal(me.user.name, 'bob');
     ctx.cleanup();
   });
 
   it('only runs the sign-on steps for a page the tab navigates to', async () => {
     const ctx = setup();
     const browser = new Browser(ctx.app);
-    signIn(ctx, browser, TONY);
+    signIn(ctx, browser, BOB);
     const state = 'a'.repeat(43);
     const background = { 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'image', 'sec-fetch-site': 'same-site' };
     const framed = { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-site' };
@@ -170,7 +170,7 @@ describe('sign-on from the control plane to an app host', () => {
   it('keeps a session alive while it is used, and ends it after six months anyway', async () => {
     const ctx = setup();
     const browser = new Browser(ctx.app);
-    signIn(ctx, browser, TONY);
+    signIn(ctx, browser, BOB);
     await browser.navigate(`${DEMO}/`);
     const before = browser.setCookies.length;
     assert.equal((await browser.fetch(`${DEMO}/_socle/api/me`)).status, 200);
@@ -191,14 +191,14 @@ describe('sign-on from the control plane to an app host', () => {
     assert.equal((await browser.fetch(`${DEMO}/_socle/api/me`)).status, 401);
     // Used every day, but created more than 180 days ago: over as well.
     run(ctx.deps.db, "UPDATE sessions SET created_at = :old WHERE scope = ''", { old: ago(181 * 86_400_000) });
-    assert.match(await (await browser.request(`${CONTROL}/`)).text(), /Se connecter avec Google/);
+    assert.match(await (await browser.request(`${CONTROL}/`)).text(), /Sign in to open your apps/);
     ctx.cleanup();
   });
 
   it('never accepts a session on another host than its own', async () => {
     const ctx = setup();
     const browser = new Browser(ctx.app);
-    signIn(ctx, browser, TONY);
+    signIn(ctx, browser, BOB);
     await browser.navigate(`${DEMO}/`);
     const demoSession = browser.cookie(DEMO, '__Host-socle_app')!;
     const controlSession = browser.cookie(CONTROL, '__Host-socle_session')!;
@@ -209,7 +209,7 @@ describe('sign-on from the control plane to an app host', () => {
     other.setCookie(NOTES, '__Host-socle_app', controlSession); // the control plane's presented to an app
     assert.equal((await other.fetch(`${NOTES}/_socle/api/me`)).status, 401);
     other.setCookie(CONTROL, '__Host-socle_session', demoSession); // an app's presented to the control plane
-    assert.match(await (await other.request(`${CONTROL}/`)).text(), /Se connecter avec Google/);
+    assert.match(await (await other.request(`${CONTROL}/`)).text(), /Sign in to open your apps/);
     ctx.cleanup();
   });
 
@@ -217,7 +217,7 @@ describe('sign-on from the control plane to an app host', () => {
     const ctx = setup();
     for (const next of ['//evil.example/', 'https://evil.example/', '/_socle/login']) {
       const browser = new Browser(ctx.app);
-      signIn(ctx, browser, TONY);
+      signIn(ctx, browser, BOB);
       const { url } = await browser.navigate(`${DEMO}/_socle/login?next=${encodeURIComponent(next)}`);
       assert.equal(url, `${DEMO}/`, next);
     }
@@ -227,7 +227,7 @@ describe('sign-on from the control plane to an app host', () => {
   it('answers 404 for an app that does not exist, on its host and on the control plane', async () => {
     const ctx = setup();
     const browser = new Browser(ctx.app);
-    signIn(ctx, browser, TONY);
+    signIn(ctx, browser, BOB);
     assert.equal((await browser.navigate('https://ghost.apps.test/')).response.status, 404);
     const state = 'a'.repeat(43);
     assert.equal((await browser.request(`${CONTROL}/sso/start?app=ghost&state=${state}&next=/`)).status, 404);
@@ -240,8 +240,8 @@ describe('sign-on from the control plane to an app host', () => {
     const ctx = setup();
     const phone = new Browser(ctx.app);
     const laptop = new Browser(ctx.app);
-    signIn(ctx, phone, TONY);
-    signIn(ctx, laptop, TONY);
+    signIn(ctx, phone, BOB);
+    signIn(ctx, laptop, BOB);
     for (const browser of [phone, laptop]) {
       await browser.navigate(`${DEMO}/`);
       await browser.navigate(`${NOTES}/`);
@@ -251,7 +251,7 @@ describe('sign-on from the control plane to an app host', () => {
     assert.equal(out.status, 200);
     assert.deepEqual(await out.json(), { url: `${CONTROL}/` });
     assert.equal((await phone.fetch(`${NOTES}/_socle/api/me`)).status, 401); // the other app too
-    assert.match(await (await phone.request(`${CONTROL}/`)).text(), /Se connecter avec Google/);
+    assert.match(await (await phone.request(`${CONTROL}/`)).text(), /Sign in to open your apps/);
     assert.equal((await laptop.fetch(`${NOTES}/_socle/api/me`)).status, 200); // another device is untouched
 
     const form = await laptop.request(`${CONTROL}/auth/logout`, { method: 'POST', headers: { origin: CONTROL } });
@@ -264,16 +264,16 @@ describe('sign-on from the control plane to an app host', () => {
   it('drops the sessions of an account removed from the allowlist', async () => {
     const before = setup();
     const browser = new Browser(before.app);
-    signIn(before, browser, CHLOE);
+    signIn(before, browser, ALICE);
     await browser.navigate(`${DEMO}/`);
     assert.equal((await browser.fetch(`${DEMO}/_socle/api/me`)).status, 200);
 
     // Same database, allowlist without her: the next request of each session is refused.
-    const restricted = new Browser(createApp({ ...before.deps, config: testConfig({ ALLOWED_EMAILS: TONY }) }));
+    const restricted = new Browser(createApp({ ...before.deps, config: testConfig({ ALLOWED_EMAILS: BOB }) }));
     restricted.setCookie(DEMO, '__Host-socle_app', browser.cookie(DEMO, '__Host-socle_app')!);
     restricted.setCookie(CONTROL, '__Host-socle_session', browser.cookie(CONTROL, '__Host-socle_session')!);
     assert.equal((await restricted.fetch(`${DEMO}/_socle/api/me`)).status, 401);
-    assert.match(await (await restricted.request(`${CONTROL}/`)).text(), /Se connecter avec Google/);
+    assert.match(await (await restricted.request(`${CONTROL}/`)).text(), /Sign in to open your apps/);
     assert.equal(get<{ n: number }>(before.deps.db, 'SELECT COUNT(*) AS n FROM sessions')!.n, 0);
     before.cleanup();
   });
