@@ -1,6 +1,7 @@
 import path from 'node:path';
-import { isValidSlug } from './apps/slug.ts';
+import { isValidSlug, parseSite, type Site } from './apps/slug.ts';
 import { isLocale, LOCALES, type Locale } from './i18n.ts';
+import { loadOAuthConfig, type OAuthConfig } from './oauth/config.ts';
 
 export interface Config {
   /** Origin of the control plane (sign-in, SSO), e.g. https://socle.example.com (no trailing slash). */
@@ -17,6 +18,8 @@ export interface Config {
   /** The OpenID Connect provider members sign in with. `name` is what the sign-in button calls it. */
   oidc: { issuer: string; clientId: string; clientSecret: string; name: string | null };
   allowedEmails: ReadonlySet<string>;
+  /** Members who publish apps and manage the instance. */
+  adminEmails: ReadonlySet<string>;
   vapid: { publicKey: string | null; privateKey: string | null; subject: string };
   /** Serves the built-in demo app on demo.<appsDomain>. */
   demoApp: boolean;
@@ -29,6 +32,8 @@ export interface Config {
   timezone: string;
   /** Language of the platform's own pages and messages. */
   locale: Locale;
+  /** The authorization server agents (MCP clients) sign in with. */
+  oauth: OAuthConfig;
 }
 
 export class ConfigError extends Error {}
@@ -84,6 +89,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (allowedEmails.size === 0) throw new ConfigError('ALLOWED_EMAILS must list at least one e-mail address');
   for (const email of allowedEmails) {
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new ConfigError(`ALLOWED_EMAILS: invalid address ${email}`);
+  }
+
+  // Without ADMIN_EMAILS the first allowed address administers the instance: someone has to.
+  const adminEmails = new Set(list(env.ADMIN_EMAILS).map((email) => email.toLowerCase()));
+  if (adminEmails.size === 0) adminEmails.add([...allowedEmails][0]!);
+  for (const email of adminEmails) {
+    if (!allowedEmails.has(email)) throw new ConfigError(`ADMIN_EMAILS: ${email} is not in ALLOWED_EMAILS`);
   }
 
   const devLogin = flag(env.DEV_LOGIN);
@@ -152,6 +164,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dataDir: path.resolve(env.DATA_DIR || 'data'),
     oidc: { issuer, clientId, clientSecret, name: env.OIDC_NAME?.trim() || null },
     allowedEmails,
+    adminEmails,
     vapid: { publicKey: vapidPublic, privateKey: vapidPrivate, subject: vapidSubject },
     demoApp: flag(env.DEMO_APP),
     devLogin,
@@ -159,12 +172,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     runnerSocket,
     timezone,
     locale,
+    oauth: loadOAuthConfig(env),
   };
 }
 
 /** Origin of an app. Always built from the configuration, never from a request's Host header. */
 export function appOrigin(config: Config, slug: string): string {
   return `${config.secureCookies ? 'https' : 'http'}://${slug}.${config.appsDomain}${config.portSuffix}`;
+}
+
+/** The address of an app (published or draft) a request host names: exactly one label in front of the apps domain. */
+export function appSiteFromHost(config: Config, host: string): Site | null {
+  const suffix = `.${config.appsDomain}${config.portSuffix}`;
+  if (!host.endsWith(suffix)) return null;
+  return parseSite(host.slice(0, -suffix.length));
 }
 
 /** The app a request host belongs to: exactly one valid label in front of the apps domain. */

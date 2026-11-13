@@ -1,3 +1,4 @@
+import { siteOf } from './apps/slug.ts';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { serve } from '@hono/node-server';
@@ -37,6 +38,7 @@ const apps = new AppStore(db, runner);
 const live = new LiveHub();
 // Open pages of an app reload when a new version of it is published.
 apps.onPublish = (slug) => live.publish(slug, 'version');
+apps.onDraft = (slug) => live.publish(siteOf(slug, true).label, 'version');
 const deps: Deps = {
   config,
   db,

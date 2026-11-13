@@ -1,7 +1,7 @@
 import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
-import { appMembers, canAccess, getApp, type AppRow } from '../apps/registry.ts';
-import { liveDatabase, type AppVersion } from '../apps/store.ts';
+import { appMembers, canAccess, getApp } from '../apps/registry.ts';
+import type { AppVersion } from '../apps/store.ts';
 import { clearAppCookie, readAppCookie, setAppCookie } from '../auth/cookies.ts';
 import {
   APP_COOKIE,
@@ -13,7 +13,7 @@ import {
 } from '../auth/sessions.ts';
 import { SSO_COOKIE, SSO_STATE_TTL_SEC, takeSsoCode } from '../auth/sso.ts';
 import { displayName, getUser } from '../auth/users.ts';
-import { appOrigin, appSlugFromHost, localDate } from '../config.ts';
+import { appOrigin, appSiteFromHost } from '../config.ts';
 import { randomToken } from '../lib/crypto.ts';
 import {
   clientIp,
@@ -28,10 +28,9 @@ import { APP_CSP, onError, securityHeaders } from '../lib/security.ts';
 import { loadStaticFiles, type StaticFile } from '../lib/static.ts';
 import { messagePage } from '../pages/layout.ts';
 import { countSubscriptions, deleteSubscription, parseSubscription, saveSubscription } from '../push/push.ts';
-import { RunnerUnavailable } from '../runner/client.ts';
-import type { CallResult, NotifyEffect } from '../runner/sandbox/call.ts';
+import type { CallResult } from '../runner/sandbox/call.ts';
 import { allowlist, type AppHostEnv, type Deps } from '../types.ts';
-import { CallGate } from './gate.ts';
+import { functionCaller } from './calls.ts';
 import { appManifest } from './manifest.ts';
 import { translator } from '../i18n.ts';
 import { shellPage } from './shell.ts';
@@ -61,8 +60,7 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
   const subscribeLimiter = new RateLimiter(30, 60_000);
   const testLimiter = new RateLimiter(10, 60_000);
   const functionLimiter = new RateLimiter(600, 60_000);
-  deps.gate ??= new CallGate();
-  const notifyLimiter = new RateLimiter(30, 60_000);
+  const callFunction = functionCaller(deps);
 
   const send = (c: Context, file: StaticFile, headers: Record<string, string> = {}) =>
     c.body(file.body, 200, { 'Content-Type': file.type, 'Cache-Control': 'no-cache', ...headers });
@@ -98,12 +96,13 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
   });
 
   app.use('*', async (c, next) => {
-    const slug = appSlugFromHost(config, new URL(c.req.url).host.toLowerCase());
-    const row = slug ? getApp(db, slug) : undefined;
-    if (!row) {
+    const site = appSiteFromHost(config, new URL(c.req.url).host.toLowerCase());
+    const row = site ? getApp(db, site.slug) : undefined;
+    if (!site || !row) {
       return c.html(message(t('App not found'), t('There is no app at this address.')), 404);
     }
     c.set('app', row);
+    c.set('site', site);
     await next();
   });
 
@@ -125,7 +124,7 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
     return c.body(asset.body, 200, headers);
   });
   app.get('/_socle/manifest.webmanifest', (c) =>
-    c.body(JSON.stringify(appManifest(c.get('app'), config.locale)), 200, {
+    c.body(JSON.stringify(appManifest(c.get('app'), config.locale, c.get('site').draft)), 200, {
       'Content-Type': 'application/manifest+json',
       'Cache-Control': 'no-cache',
     }),
@@ -133,7 +132,7 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
 
   app.use('*', async (c, next) => {
     const token = readAppCookie(c, config, APP_COOKIE);
-    const found = token ? resolveSession(db, token, c.get('app').slug, isAllowed) : null;
+    const found = token ? resolveSession(db, token, c.get('site').label, isAllowed) : null;
     const session = found && canAccess(found.user, c.get('app')) ? found : null;
     if (token && session?.renewed) setAppCookie(c, config, APP_COOKIE, token, SESSION_TTL_MS / 1000);
     c.set('session', session);
@@ -151,7 +150,7 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
     const state = randomToken();
     setAppCookie(c, config, SSO_COOKIE, state, SSO_STATE_TTL_SEC);
     const target = new URL('/sso/start', config.controlOrigin);
-    target.searchParams.set('app', c.get('app').slug);
+    target.searchParams.set('app', c.get('site').label);
     target.searchParams.set('state', state);
     target.searchParams.set('next', next);
     c.header('Cache-Control', 'no-store');
@@ -164,7 +163,7 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
     clearAppCookie(c, config, SSO_COOKIE);
     c.header('Cache-Control', 'no-store');
     c.header('Referrer-Policy', 'no-referrer');
-    const grant = takeSsoCode(db, { code: c.req.query('code') ?? '', app: c.get('app').slug, state }, deps.now());
+    const grant = takeSsoCode(db, { code: c.req.query('code') ?? '', app: c.get('site').label, state }, deps.now());
 
     // Another tab finished signing in first (two tabs restored together): the code brings
     // nothing new, it only says where this tab wanted to go.
@@ -184,7 +183,7 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
     }
     const { token } = createSession(db, {
       userId: user.id,
-      scope: c.get('app').slug,
+      scope: c.get('site').label,
       family: grant.family,
       userAgent: c.req.header('user-agent') ?? null,
     });
@@ -217,14 +216,14 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
 
   app.use('/_socle/api/*', async (c, next) => {
     const read = c.req.method === 'GET' || c.req.method === 'HEAD';
-    const own = read ? isOwnFetch(c) : isSameOrigin(c, appOrigin(config, c.get('app').slug));
+    const own = read ? isOwnFetch(c) : isSameOrigin(c, appOrigin(config, c.get('site').label));
     if (!own) return problem(c, 403, 'forbidden', t('Unexpected origin.'));
     c.header('Cache-Control', 'no-store');
     await next();
   });
 
-  const target = (c: Context<AppHostEnv>) => ({ userId: c.get('session')!.user.id, app: c.get('app').slug });
-  const limitKey = (c: Context<AppHostEnv>) => `${c.get('app').slug}:${c.get('session')!.user.id}`;
+  const target = (c: Context<AppHostEnv>) => ({ userId: c.get('session')!.user.id, app: c.get('site').label });
+  const limitKey = (c: Context<AppHostEnv>) => `${c.get('site').label}:${c.get('session')!.user.id}`;
   const jsonBody = async (c: Context): Promise<unknown> => {
     if (!(c.req.header('content-type') ?? '').toLowerCase().startsWith('application/json')) return undefined;
     return c.req.json().catch(() => undefined);
@@ -272,7 +271,7 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
     if (!testLimiter.take(limitKey(c))) {
       return problem(c, 429, 'rate_limited', t('Too many test notifications. Try again in a minute.'));
     }
-    const sent = await deps.push.sendToUser(c.get('session')!.user.id, c.get('app').slug, {
+    const sent = await deps.push.sendToUser(c.get('session')!.user.id, c.get('site').label, {
       title: t('{name}: it works', { name: c.get('app').name }),
       body: t('Notifications from this app will arrive here.'),
       url: '/',
@@ -288,38 +287,12 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
     return c.json({ url: SIGNED_OUT_PATH });
   });
 
-  /** Sends what a mutation asked for, to members of this app only. */
-  const notify = (row: AppRow, callerId: number, effects: NotifyEffect[]) => {
-    if (effects.length === 0) return;
-    const members = appMembers(db, row, isAllowed).map((member) => member.id);
-    for (const [index, effect] of effects.entries()) {
-      const wanted =
-        effect.to === 'all' ? members : effect.to === 'others' ? members.filter((id) => id !== callerId) : effect.to;
-      for (const userId of new Set(wanted)) {
-        if (!members.includes(userId)) continue;
-        if (!notifyLimiter.take(`${row.slug}:${userId}`)) {
-          console.warn(`[${row.slug}] too many notifications for member ${userId}, dropped`);
-          continue;
-        }
-        deps.push
-          .sendToUser(userId, row.slug, {
-            title: effect.title,
-            body: effect.body,
-            url: effect.url,
-            tag: `${row.slug}-${deps.now().getTime()}-${index}`,
-          })
-          .catch((error: unknown) => console.warn(`[${row.slug}] notification failed:`, (error as Error).message));
-      }
-    }
-  };
-
-  const failure = (c: Context<AppHostEnv>, fn: string, result: Extract<CallResult, { ok: false }>) => {
+  const failure = (c: Context<AppHostEnv>, result: Extract<CallResult, { ok: false }>) => {
     const { code, message } = result.error;
     if (code === 'invalid_input') return problem(c, 400, code, message);
     if (code === 'unknown_function') return problem(c, 404, code, t('Unknown function.'));
     // An error the app raised on purpose, with a message written for its users.
     if (code.startsWith('user:')) return problem(c, 422, code.slice('user:'.length), message);
-    console.warn(`[${c.get('app').slug}] ${fn} failed (${code}): ${message}`);
     // While developing, the reason is more useful than a polite sentence.
     const detail = config.devLogin ? `${APP_ERROR} (${code}: ${message})` : APP_ERROR;
     if (code === 'timeout') {
@@ -334,7 +307,8 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
   app.post('/_socle/api/fn/:name', async (c) => {
     if (!functionLimiter.take(limitKey(c))) return problem(c, 429, 'rate_limited', t('Too many requests.'));
     const row = c.get('app');
-    const version = deps.apps.live(row.slug);
+    const site = c.get('site');
+    const version = deps.apps.serving(row.slug, site.draft ? 'draft' : 'live');
     const info = version?.functions.get(c.req.param('name'));
     if (!version?.bundleHash || !info) return problem(c, 404, 'unknown_function', t('Unknown function.'));
     const body = (await jsonBody(c)) as { input?: unknown; query?: unknown } | undefined;
@@ -350,46 +324,22 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
     } catch {
       return problem(c, 400, 'invalid_input', 'input: nested too deeply');
     }
-    const caller = self(c);
-    const { bundleHash } = version;
-    const send = () =>
-      deps.runner.call({
-        database: liveDatabase(row.slug),
-        bundleHash,
-        fn: info.name,
-        kind: info.kind,
-        inputJson,
-        user: caller,
-        members: appMembers(db, row, isAllowed),
-        now: deps.now().getTime(),
-        today: localDate(config, deps.now()),
-        locale: config.locale,
-      });
-    let result: CallResult | 'busy' | 'gone';
-    try {
-      result = await deps.gate!.run(row.slug, c.req.raw.signal, async () => {
-        const first = await send();
-        if (first.ok || first.error.code !== 'bundle_missing') return first;
-        // The runner lost this app's code (a fresh volume, for instance): give it again, once.
-        const bundle = deps.apps.bundleOf(version.id);
-        if (bundle === null) return first;
-        await deps.runner.install(row.slug, bundle);
-        return send();
-      });
-    } catch (error) {
-      if (!(error instanceof RunnerUnavailable)) throw error;
-      console.error(`runner unavailable (${error.code}): ${error.message}`);
+    const result = await callFunction({
+      app: row,
+      site,
+      version,
+      info,
+      inputJson,
+      caller: self(c),
+      client: c.req.header('x-socle-client'),
+      signal: c.req.raw.signal,
+    });
+    if (result === 'unavailable') {
       return problem(c, 503, 'unavailable', t('The service is temporarily unavailable.'));
     }
     if (result === 'gone') return c.body(null, 204); // nobody is listening any more
     if (result === 'busy') return problem(c, 503, 'busy', t('The app is busy. Try again in a moment.'));
-    for (const line of result.logs) console.info(`[${row.slug}] ${info.name}: ${line}`);
-    if (!result.ok) return failure(c, info.name, result);
-    if (result.kind === 'mutation') {
-      const client = c.req.header('x-socle-client') ?? '';
-      deps.live.publish(row.slug, 'change', { client: /^[a-z0-9]{1,40}$/.test(client) ? client : '' });
-      notify(row, caller.id, result.effects);
-    }
+    if (!result.ok) return failure(c, result);
     // The result is already JSON text, checked by the runner: it is passed on, not rebuilt.
     return c.body(`{"kind":"${result.kind}","value":${result.json}}`, 200, { 'Content-Type': 'application/json' });
   });
@@ -399,7 +349,7 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
     // HEAD is routed here too: it would open a stream that nobody reads or closes.
     if (c.req.method !== 'GET') return c.body(null, 405, { Allow: 'GET' });
     const session = c.get('session')!;
-    const { slug } = c.get('app');
+    const slug = c.get('site').label;
     const encoder = new TextEncoder();
     let release = () => {};
     const stream = new ReadableStream<Uint8Array>({
@@ -472,11 +422,15 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
   // Every other path is a screen of the app: the platform writes the document around it.
   app.get('*', (c) => {
     if (!isNavigation(c)) return c.text('Not found', 404);
-    const version = deps.apps.live(c.get('app').slug);
+    const { draft } = c.get('site');
+    const version = deps.apps.serving(c.get('app').slug, draft ? 'draft' : 'live');
     if (!version) {
-      return c.html(message(c.get('app').name, t('This app has no published version yet.')), 404);
+      const why = draft ? t('This app has no draft that builds yet.') : t('This app has no published version yet.');
+      return c.html(message(c.get('app').name, why), 404);
     }
-    return c.html(shellPage(c.get('app'), version.assetHash, boot(c), t), 200, { 'Cache-Control': 'no-store' });
+    return c.html(shellPage(c.get('app'), version.assetHash, boot(c), t, draft), 200, {
+      'Cache-Control': 'no-store',
+    });
   });
 
   app.notFound((c) => c.text('Not found', 404));

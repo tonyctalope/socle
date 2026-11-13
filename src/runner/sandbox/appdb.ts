@@ -331,6 +331,37 @@ const INTRUDERS = `SELECT name FROM sqlite_master
   LIMIT 1`;
 
 /**
+ * Empties a database: every table, view and trigger of the app, and the record of which
+ * migrations ran. For a draft whose migrations were rewritten; the file and the handles
+ * other processes hold on it stay valid.
+ */
+export function resetDatabase(connection: Connection): void {
+  const { db } = connection;
+  const quoted = (name: string) => `"${name.replaceAll('"', '""')}"`;
+  db.exec('PRAGMA foreign_keys = OFF');
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const objects = db
+      .prepare(
+        "SELECT type, name FROM sqlite_master WHERE type IN ('trigger', 'view', 'table') AND name NOT LIKE 'sqlite_%'",
+      )
+      .all() as { type: string; name: string }[];
+    // Triggers and views first: they may name tables that are about to go.
+    for (const kind of ['trigger', 'view', 'table']) {
+      for (const object of objects) {
+        if (object.type === kind) db.exec(`DROP ${kind.toUpperCase()} IF EXISTS ${quoted(object.name)}`);
+      }
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    if (db.isTransaction) db.exec('ROLLBACK');
+    throw error;
+  } finally {
+    db.exec('PRAGMA foreign_keys = ON');
+  }
+}
+
+/**
  * Brings an app database up to date. New migrations apply together or not at all;
  * one that was already applied must not have changed since.
  */

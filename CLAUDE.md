@@ -16,7 +16,7 @@ Two processes, one image:
   container with no network and no secret, reached over a Unix socket.
 
 The goal that shapes every decision: **one dependency tree to keep patched**. Apps never bring npm packages of
-their own, server or browser side. Keep the platform's own tree small (10 production dependencies today).
+their own, server or browser side. Keep the platform's own tree small (12 production dependencies today).
 
 ## Commands
 
@@ -61,8 +61,21 @@ the sandbox load: `src/kit`, `src/demo`).
   `@socle/server`. The runner builds all of it once (`build/vendor.ts`) into ES modules served at
   `/_socle/vendor/*`, together with React: an app's bundle imports them by URL, so a page holds one React and a
   platform update reaches every app without rebuilding any.
-- `src/apps/store.ts` — versions of an app (sources + what the runner built) in the platform database;
-  `deploy()` = build, migrate the app's database, then point `apps.live_version` at the new version.
+- `src/apps/store.ts` — versions of an app (sources + what the runner built) in the platform database. An app has
+  a **draft** (`app_drafts`: the files agents edit; `apps.draft_version`: the last build of them) and a published
+  version (`apps.live_version`). `saveDraft()` builds and migrates the draft's database; `publishDraft()` runs the
+  draft's migrations on the published database, then points `live_version` at it. `deploy()` does both at once for
+  the demo app.
+- `src/apps/slug.ts` — an app has **two addresses**: `<slug>.<APPS_DOMAIN>` and `<slug>--draft.<APPS_DOMAIN>`
+  (`Site`). The label is what sessions, sign-on codes, notifications and the call gate are filed under, so the
+  two never share anything; `c.get('site')` on an app host says which one a request is for.
+- `src/apphost/calls.ts` — one call of a server function, for a screen (HTTP) or an agent (MCP): gate, database
+  of the right address, log, live update, notifications.
+- `src/oauth/` — the authorization server MCP clients sign in with (OAuth 2.1, PKCE, dynamic registration and
+  client metadata documents). One server for every MCP endpoint; a token is bound to one resource.
+- `src/mcp/` — `http.ts` (an MCP endpoint behind those tokens), `builder.ts` (the tools that create and change
+  apps, at `<CONTROL_URL>/mcp`), `guide.ts` (what an agent reads before writing an app: keep it exact).
+- `src/control/admin.ts` — `/admin/`: an administrator (`ADMIN_EMAILS`) publishes or discards drafts.
 - `src/demo/` — the demo app, as the folder of sources an agent would send (`app.json`, `web/main.tsx`,
   `server/index.ts`, `migrations/*.sql`). It goes through the same build and sandbox as any app.
 - `src/runner/` — see below.
@@ -132,7 +145,12 @@ the parent domain. Everything below exists because of that; none of it is option
 - Apps receive a user id and a display name, never the e-mail address.
 - Secrets (session ids, sign-on codes) are random 256-bit and stored **only as SHA-256 hashes**. Never log query
   strings (the access log in `src/app.ts` drops them).
-- The allowlist (`ALLOWED_EMAILS`) is checked at login and on every use of a session.
+- The allowlist (`ALLOWED_EMAILS`) is checked at login and on every use of a session or of an MCP token.
+- **Agents never change what members use.** The builder's tools only touch drafts; there is no tool that
+  publishes, deletes an app or empties published data (`migrate` with `reset` is refused for `*/live` in the
+  runner itself). Publishing is a form of the control plane, admin-only, with the exact-origin check.
+- A draft is another origin with its own database: a draft's code never sees published data, and a session of
+  one address is not a session of the other.
 - Push endpoints are restricted to the browsers' push services (`parseSubscription`) and capped per member and app
   (`MAX_SUBSCRIPTIONS`), so a subscription can neither make the server call arbitrary URLs nor fan out without
   bound.
@@ -216,9 +234,12 @@ the containers by hand instead of from `compose.yaml`.
 ## Roadmap
 
 1. Done: kernel, sign-on per subdomain, PWA and notifications.
-2. **Done here**: the runner (build without install, server functions in a sandbox, one database per app,
-   migrations, live updates), the SDK and UI kit, the demo app on that pipeline.
-3. MCP: one builder server on the control plane and one MCP server per app that offers the functions marked
-   `tool` (their input schemas already come out of the build); drafts with their own database that an administrator
-   publishes, versions, rollback; an app log the agent can read; per-app icons and access lists.
-4. Scheduled functions (`user` is null for those), then files and photos.
+2. Done: the runner (build without install, server functions in a sandbox, one database per app, migrations,
+   live updates), the SDK and UI kit, the demo app on that pipeline.
+3. **Done here**: drafts with their own address and database, the builder MCP server and its OAuth server, the
+   administration page where a person publishes.
+4. Next: one MCP server per app that offers the functions marked `tool` (their input schemas already come out of
+   the build; resource = `https://<app host>/_socle/mcp`, same authorization server); versions and rollback in the
+   administration page; per-app icons and access lists; the platform database's nightly copy out of the web
+   process; the smoke test started from `compose.yaml`.
+5. Scheduled functions (`user` is null for those), then files and photos.

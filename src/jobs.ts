@@ -3,6 +3,8 @@ import path from 'node:path';
 import { listApps } from './apps/registry.ts';
 import { liveDatabase } from './apps/store.ts';
 import { purgeExpired } from './auth/sessions.ts';
+import { purgeClients } from './oauth/clients.ts';
+import { purgeOAuth } from './oauth/tokens.ts';
 import { run } from './db/database.ts';
 import type { Deps } from './types.ts';
 
@@ -58,6 +60,8 @@ export function startJobs(deps: Deps): () => void {
   const tick = () => {
     try {
       purgeExpired(deps.db);
+      purgeOAuth(deps.db);
+      purgeClients(deps.db);
       const now = deps.now().toISOString();
       const today = now.slice(0, 10);
       // 02:30 UTC: the middle of the night in France, summer and winter.

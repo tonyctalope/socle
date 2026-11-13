@@ -2,7 +2,7 @@ import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { html } from 'hono/html';
 import { canAccess, getApp, listApps } from '../apps/registry.ts';
-import { isValidSlug } from '../apps/slug.ts';
+import { parseSite } from '../apps/slug.ts';
 import { clearAppCookie, readAppCookie, setAppCookie } from '../auth/cookies.ts';
 import { CALLBACK_PATH, LOGIN_COOKIE, LOGIN_TTL_SEC, LoginError } from '../auth/oidc.ts';
 import {
@@ -26,7 +26,12 @@ import { clientIp, isSameOrigin, isTopLevelNavigation, RateLimiter, safeNextPath
 import { CONTROL_CSP, onError, securityHeaders } from '../lib/security.ts';
 import { loadStaticFiles } from '../lib/static.ts';
 import { messagePage, page } from '../pages/layout.ts';
-import { allowlist, type ControlEnv, type Deps } from '../types.ts';
+import { allowlist, isAdmin, type ControlEnv, type Deps } from '../types.ts';
+import { buildBuilderServer } from '../mcp/builder.ts';
+import { builderResource, mcpCors, mcpEndpoint } from '../mcp/http.ts';
+import { protectedResourceMetadata } from '../oauth/metadata.ts';
+import { oauthRoutes } from '../oauth/routes.ts';
+import { adminRoutes } from './admin.ts';
 
 /** Long enough for the way back to an app page (its path, encoded once more). */
 const NEXT_MAX = 1500;
@@ -45,7 +50,25 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
   const ssoLimiter = new RateLimiter(120, 60_000);
 
   app.use('*', securityHeaders(config, CONTROL_CSP));
-  app.use('*', bodyLimit({ maxSize: 64 * 1024, onError: (c) => c.text('Request too large', 413) }));
+  // Small bodies everywhere, except the MCP endpoint: an app's files travel through it, and
+  // the MCP handler has its own limit, applied once the bearer token is verified.
+  const smallBody = bodyLimit({ maxSize: 64 * 1024, onError: (c) => c.text('Request too large', 413) });
+  app.use('*', (c, next) => (c.req.path === '/mcp' ? next() : smallBody(c, next)));
+
+  // The builder: the MCP endpoint agents create and change apps through. It is authenticated by
+  // a bearer token of the platform's authorization server, never by a cookie.
+  const builder = builderResource(config);
+  const builderCard = () => ({
+    name: t('the app builder'),
+    description: t('It will be able to create apps and change their drafts. It cannot publish: an administrator does.'),
+  });
+  const mcp = mcpEndpoint(deps, builder, (caller) => buildBuilderServer(deps, caller));
+  app.use('/mcp', mcpCors);
+  app.all('/mcp', (c) => mcp(c));
+  app.use('/.well-known/oauth-protected-resource/*', mcpCors);
+  app.get('/.well-known/oauth-protected-resource/mcp', (c) =>
+    c.json(protectedResourceMetadata(config, builder, 'Socle')),
+  );
 
   app.get('/healthz', async (c) => {
     get(db, 'SELECT 1 AS ok');
@@ -93,7 +116,8 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
         }),
       );
     }
-    const apps = listApps(db).filter((row) => canAccess(session.user, row));
+    // An app that was never published only exists for those who work on it (see /admin).
+    const apps = listApps(db).filter((row) => row.live_version !== null && canAccess(session.user, row));
     return c.html(
       page(
         config.locale,
@@ -118,6 +142,11 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
           <p class="muted">
             ${t('To install an app on your phone, open it, then choose “Add to Home Screen” in the browser menu.')}
           </p>
+          ${
+            isAdmin(config, session.user)
+              ? html`<p class="actions"><a class="button secondary" href="/admin/">${t('Administration')}</a></p>`
+              : ''
+          }
           <form class="actions" method="post" action="/auth/logout">
             <button class="secondary" type="submit">${t('Sign out')}</button>
           </form>`,
@@ -229,6 +258,13 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
     });
   }
 
+  app.route('/', adminRoutes(deps));
+  // Which MCP endpoints exist, and who may get a token for each: only the builder for now.
+  app.route(
+    '/',
+    oauthRoutes(deps, (resource) => (resource === builder ? builderCard() : null)),
+  );
+
   // Sign-on towards an app host: see src/auth/sso.ts for the whole flow.
   app.get('/sso/start', (c) => {
     if (!isTopLevelNavigation(c)) return c.text('Navigation expected', 400);
@@ -236,18 +272,19 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
       return c.html(tooMany(), 429);
     }
     const home = { href: '/', label: t('Home') };
-    const slug = c.req.query('app') ?? '';
+    // `app` names one of an app's two addresses: the published one or its draft's.
+    const site = parseSite(c.req.query('app') ?? '');
     const state = c.req.query('state') ?? '';
     const next = safeNextPath(c.req.query('next'), 300);
-    if (!isValidSlug(slug) || !isToken(state)) {
+    if (!site || !isToken(state)) {
       return c.html(message(t('Invalid link'), t('This sign-in link is incomplete.'), home), 400);
     }
     const session = c.get('session');
     if (!session) {
-      const back = `/sso/start?app=${slug}&state=${state}&next=${encodeURIComponent(next)}`;
+      const back = `/sso/start?app=${site.label}&state=${state}&next=${encodeURIComponent(next)}`;
       return c.redirect(`/auth/start?next=${encodeURIComponent(back)}`, 302);
     }
-    const target = getApp(db, slug);
+    const target = getApp(db, site.slug);
     if (!target) return c.html(message(t('App not found'), t('This app does not exist.'), home), 404);
     if (!canAccess(session.user, target)) {
       return c.html(
@@ -257,12 +294,12 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
     }
     const code = createSsoCode(
       db,
-      { userId: session.user.id, app: slug, family: session.family, state, nextPath: next },
+      { userId: session.user.id, app: site.label, family: session.family, state, nextPath: next },
       deps.now(),
     );
     if (!code) return c.html(message(t('Too many sign-ins in progress'), t('Try again in a minute.')), 503);
     c.header('Cache-Control', 'no-store');
-    return c.redirect(`${appOrigin(config, slug)}/_socle/sso?code=${code}`, 302);
+    return c.redirect(`${appOrigin(config, site.label)}/_socle/sso?code=${code}`, 302);
   });
 
   app.notFound((c) =>
