@@ -73,6 +73,12 @@ the sandbox load: `src/kit`, `src/demo`).
   published version of each app, the latest occurrence that has come is run once, as a mutation without a caller
   (`user` null). The occurrence is written down (`app_schedules`) before the call; a schedule seen for the first
   time starts with its next occurrence; screens and tools cannot call a scheduled function.
+- `src/files/store.ts` — the files members add to an app (photos, documents): kept by the web process under
+  `DATA_DIR/files/<label>/` (one folder per address: a draft's files are not the published app's), recognised
+  from their first bytes (JPEG, PNG, WebP, GIF, PDF; never SVG or HTML), bounded per file and per address, served
+  to that address's sessions only. The browser sends them (`files.upload*` in the SDK); a mutation deletes one
+  with `files.remove(id)`, an effect applied after it succeeded, like `notify`. `src/apps/wiring.ts` says what
+  follows an app's events (reloads, streams, files) for the server and the tests alike.
 - `src/apphost/calls.ts` — one call of a server function, for a screen (HTTP) or an agent (MCP): gate, database
   of the right address, log, live update, notifications.
 - `src/oauth/` — the authorization server MCP clients sign in with (OAuth 2.1, PKCE, dynamic registration and
@@ -269,4 +275,4 @@ icons, scheduled functions.
    administration page where a person publishes.
 4. Done: one MCP server per app (functions marked `tool`), removing an app, connected applications, versions
    and return to an earlier one, access lists, per-app icons.
-5. Done: scheduled functions. Next: files and photos.
+5. Done: scheduled functions; files and photos.
