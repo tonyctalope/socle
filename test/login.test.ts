@@ -171,6 +171,7 @@ describe('Sign-in with an OpenID Connect provider and the e-mail allowlist', () 
     );
     assert.deepEqual(tables.map((table) => table.name).sort(), [
       'app_drafts',
+      'app_files',
       'app_logs',
       'app_schedules',
       'app_versions',

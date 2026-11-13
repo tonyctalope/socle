@@ -3,8 +3,8 @@ import { words } from './boot.ts';
 
 const API = '/_socle/api';
 const TEXT = words({
-  en: { offline: 'No connection to the server.' },
-  fr: { offline: 'Pas de connexion au serveur.' },
+  en: { offline: 'No connection to the server.', failed: 'The request failed' },
+  fr: { offline: 'Pas de connexion au serveur.', failed: 'La demande a échoué' },
 });
 
 export class ApiError extends Error {
@@ -50,7 +50,7 @@ export async function request<T = unknown>(
   if (response.status === 204) return null as T;
   const data = (await response.json().catch(() => null)) as { error?: string; message?: string } | null;
   if (!response.ok) {
-    throw new ApiError(data?.message || `Erreur ${response.status}`, response.status, data?.error || 'error');
+    throw new ApiError(data?.message || `${TEXT.failed} (${response.status})`, response.status, data?.error || 'error');
   }
   return data as T;
 }

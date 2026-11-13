@@ -36,6 +36,7 @@ import { mcpCors, mcpEndpoint } from '../mcp/http.ts';
 import { protectedResourceMetadata } from '../oauth/metadata.ts';
 import { functionCaller } from './calls.ts';
 import { appManifest } from './manifest.ts';
+import { FILE_LIMITS } from '../files/store.ts';
 import { translator } from '../i18n.ts';
 import { shellPage } from './shell.ts';
 
@@ -45,6 +46,8 @@ const VENDOR = '/_socle/vendor';
 const SIGNED_OUT_PATH = '/_socle/signed-out';
 /** A function's input travels as JSON in the request body. */
 const MAX_BODY = 300 * 1024;
+const FILES = '/_socle/files';
+const FILES_API = '/_socle/api/files';
 /** How often an open event stream proves it is alive, and its session still valid. */
 const STREAM_PING_MS = 25_000;
 
@@ -66,12 +69,15 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
   const testLimiter = new RateLimiter(10, 60_000);
   const functionLimiter = new RateLimiter(600, 60_000);
   const callFunction = functionCaller(deps);
+  const uploadLimiter = new RateLimiter(60, 60_000);
+  const tooLarge = () =>
+    t('This file is too large ({limit} MB at most).', { limit: String(FILE_LIMITS.maxBytes / 1024 / 1024) });
 
   const send = (c: Context, file: StaticFile, headers: Record<string, string> = {}) =>
     c.body(file.body, 200, { 'Content-Type': file.type, 'Cache-Control': 'no-cache', ...headers });
   const problem = (
     c: Context,
-    status: 400 | 401 | 403 | 404 | 422 | 429 | 500 | 503 | 504,
+    status: 400 | 401 | 403 | 404 | 413 | 415 | 422 | 429 | 500 | 503 | 504 | 507,
     error: string,
     message: string,
   ) => c.json({ error, message }, status);
@@ -83,7 +89,15 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
   const APP_ERROR = t('The app ran into an error.');
 
   app.use('*', securityHeaders(config, APP_CSP));
-  app.use('*', bodyLimit({ maxSize: MAX_BODY, onError: (c) => c.text('Request too large', 413) }));
+  // Small bodies everywhere, except where a member sends a file: that route has its own limit.
+  const smallBody = bodyLimit({ maxSize: MAX_BODY, onError: (c) => c.text('Request too large', 413) });
+  const fileBody = bodyLimit({
+    maxSize: FILE_LIMITS.maxBytes,
+    onError: (c) => c.json({ error: 'too_large', message: tooLarge() }, 413),
+  });
+  app.use('*', (c, next) =>
+    c.req.path === FILES_API && c.req.method === 'POST' ? fileBody(c, next) : smallBody(c, next),
+  );
 
   // Only the platform's own service worker may be registered on an app origin: a worker
   // written by an app could answer page requests itself and drop the headers that confine it.
@@ -346,6 +360,33 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
       tag: 'socle-test',
     });
     return c.json({ sent });
+  });
+
+  // A member adds a file to the app: the body is the file itself. What it is is read from its
+  // first bytes, not from what the browser says; the answer is the id the app keeps.
+  app.post(FILES_API, async (c) => {
+    if (!uploadLimiter.take(limitKey(c))) return problem(c, 429, 'rate_limited', t('Too many requests.'));
+    const bytes = new Uint8Array(await c.req.arrayBuffer());
+    const stored = deps.files.save(c.get('site'), c.get('session')!.user.id, bytes);
+    if (!stored.ok) {
+      if (stored.reason === 'too_large') return problem(c, 413, 'too_large', tooLarge());
+      if (stored.reason === 'full') return problem(c, 507, 'full', t('This app has no room left for files.'));
+      return problem(c, 415, 'unsupported_type', t('Only pictures (JPEG, PNG, WebP, GIF) and PDF files are kept.'));
+    }
+    const { id, type, bytes: size } = stored.file;
+    return c.json({ id, type, bytes: size, url: `${FILES}/${id}` }, 201);
+  });
+
+  // A file of this address, for the members of the app. Its address never changes content.
+  app.get(`${FILES}/:id`, (c) => {
+    const file = deps.files.read(c.get('site'), c.req.param('id'));
+    if (!file) return c.text('Not found', 404);
+    return c.body(file.content, 200, {
+      'Content-Type': file.type,
+      'Cache-Control': 'private, max-age=31536000, immutable',
+      // A document is saved, not opened in the app's origin; pictures are shown where the app puts them.
+      ...(file.type.startsWith('image/') ? {} : { 'Content-Disposition': 'attachment' }),
+    });
   });
 
   // Ends the sign-in on this browser for the control plane and every app, and its notifications.

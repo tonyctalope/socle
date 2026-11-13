@@ -8,6 +8,7 @@ import type { IdentityProvider } from './auth/oidc.ts';
 import type { ActiveSession } from './auth/sessions.ts';
 import type { Config } from './config.ts';
 import type { Db } from './db/database.ts';
+import type { FileStore } from './files/store.ts';
 import type { PushService } from './push/push.ts';
 import type { Runner } from './runner/client.ts';
 
@@ -19,6 +20,8 @@ export interface Deps {
   /** Builds apps and runs their server functions, away from this process's secrets. */
   runner: Runner;
   apps: AppStore;
+  /** The photos and documents members add to apps. */
+  files: FileStore;
   live: LiveHub;
   /** Shares the runner's workers between apps (see apphost/gate.ts). Created by the app host when absent. */
   gate?: CallGate;

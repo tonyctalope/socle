@@ -15,6 +15,8 @@ import {
   LogoutButton,
   NotificationSettings,
   Page,
+  Photo,
+  PhotoButton,
   Spinner,
 } from '@socle/ui';
 
@@ -31,6 +33,8 @@ const TEXT = words({
     toAdd: 'To add',
     add: 'Add',
     empty: 'The list is empty',
+    addPhoto: 'Add with a photo',
+    photo: 'Photo',
     remove: 'Remove',
   },
   fr: {
@@ -46,6 +50,8 @@ const TEXT = words({
     toAdd: 'À ajouter',
     add: 'Ajouter',
     empty: 'La liste est vide',
+    addPhoto: 'Ajouter avec une photo',
+    photo: 'Photo',
     remove: 'Supprimer',
   },
 });
@@ -55,6 +61,7 @@ interface Item {
   label: string;
   done: number;
   author: number;
+  photo: string | null;
 }
 
 function SharedList() {
@@ -88,6 +95,14 @@ function SharedList() {
           />
           <Button type="submit">{TEXT.add}</Button>
         </form>
+        {/* A photo is sent to the platform first; the item then carries its id. */}
+        <PhotoButton
+          onPhoto={(photo) =>
+            run(api.add({ label: label.trim() || TEXT.photo, photo: photo.id }).then(() => setLabel('')))
+          }
+        >
+          {TEXT.addPhoto}
+        </PhotoButton>
         <ErrorNote>{error ?? items.error?.message}</ErrorNote>
         {items.loading ? (
           <Spinner />
@@ -116,6 +131,7 @@ function SharedList() {
                     checked={item.done === 1}
                     onChange={() => run(api.toggle({ id: item.id }))}
                   />
+                  {item.photo && <Photo id={item.photo} alt={item.label} className="size-12" />}
                   <span className={item.done ? 'text-muted line-through' : ''}>{item.label}</span>
                   <span className="ml-auto">
                     <Avatar name={nameOf(item.author)} />
