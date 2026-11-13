@@ -53,7 +53,7 @@ describe('sign-on from the control plane to an app host', () => {
       hops.map((hop) => new URL(hop).origin + new URL(hop).pathname),
       [`${DEMO}/depenses`, `${DEMO}/_socle/login`, `${CONTROL}/sso/start`, `${DEMO}/_socle/sso`, `${DEMO}/depenses`],
     );
-    assert.match(await response.text(), /<script type="module" src="\/assets\/main\.js">/);
+    assert.match(await response.text(), /<script type="module" src="\/assets\/[0-9a-f]{16}\/main\.js">/);
 
     const me = await browser.fetch(`${DEMO}/_socle/api/me`);
     assert.equal(me.status, 200);

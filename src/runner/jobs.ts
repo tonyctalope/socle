@@ -4,6 +4,7 @@ import type { Limits } from './limits.ts';
 import {
   AppDatabases,
   applyMigrations,
+  backupDatabase,
   MigrationError,
   type Migration,
   type MigrationOutcome,
@@ -19,6 +20,8 @@ export type Job =
   | { type: 'build'; files: unknown }
   | { type: 'migrate'; database: string; migrations: Migration[] }
   | { type: 'vendor' }
+  /** Copies an app database next to it, once per day. */
+  | { type: 'backup'; database: string; date: string; keep: number }
   /** Loads the interpreter and the bundler, so the first real job is not the slow one. */
   | { type: 'warm' };
 
@@ -30,6 +33,7 @@ export interface JobResults {
   build: BuildOutcome;
   migrate: MigrateResult;
   vendor: VendorFiles;
+  backup: { ok: true; written: boolean } | { ok: false; message: string };
   warm: { ok: true };
 }
 
@@ -63,6 +67,12 @@ export function createExecutor(appsDir: string, limits: Limits): Executor {
         return buildApp(job.files, limits);
       case 'vendor':
         return buildVendor();
+      case 'backup':
+        try {
+          return { ok: true, written: backupDatabase(appsDir, job.database, job.date, job.keep) !== null };
+        } catch (error) {
+          return { ok: false, message: (error as Error).message };
+        }
       case 'warm':
         await buildApp({ 'app.json': '{"name":"warm"}', 'web/main.tsx': 'export default () => null;' }, limits);
         return { ok: true };

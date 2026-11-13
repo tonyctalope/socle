@@ -20,5 +20,5 @@
       "@socle/ui": ["./src/kit/ui/index.tsx"]
     }
   },
-  "include": ["src/kit"]
+  "include": ["src/kit", "src/demo"]
 }

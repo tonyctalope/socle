@@ -117,6 +117,16 @@ export function resolveSession(
   };
 }
 
+/** Whether a session resolved earlier still stands (long-lived connections ask again from time to time). */
+export function sessionStillValid(db: Db, session: ActiveSession, isAllowed: (email: string) => boolean): boolean {
+  const row = get<{ expires_at: string; email: string }>(
+    db,
+    `SELECT s.expires_at, u.email FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id_hash = :id`,
+    { id: session.idHash },
+  );
+  return row !== undefined && Date.parse(row.expires_at) > Date.now() && isAllowed(row.email);
+}
+
 const FAMILY_TABLES = ['sessions', 'sso_codes', 'push_subscriptions'] as const;
 
 /** Signing out on any host ends the sign-in everywhere on that browser, notifications included. */

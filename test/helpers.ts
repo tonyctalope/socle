@@ -4,13 +4,17 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Hono } from 'hono';
 import { createApp } from '../src/app.ts';
-import { syncDemoApp } from '../src/apps/registry.ts';
+import { LiveHub } from '../src/apphost/live.ts';
+import type { VendorAsset } from '../src/apphost/vendor.ts';
+import { AppStore } from '../src/apps/store.ts';
 import type { IdentityProvider } from '../src/auth/google.ts';
 import { CONTROL_SCOPE, createSession } from '../src/auth/sessions.ts';
 import { upsertUser } from '../src/auth/users.ts';
 import { loadConfig, type Config } from '../src/config.ts';
 import { openDatabase, run } from '../src/db/database.ts';
 import type { PushMessage, PushService } from '../src/push/push.ts';
+import { localRunner } from '../src/runner/client.ts';
+import { DEFAULT_LIMITS, type Limits } from '../src/runner/limits.ts';
 import type { Deps } from '../src/types.ts';
 
 // The access log and login lines would drown the test report.
@@ -53,33 +57,79 @@ export const unusedIdentity: IdentityProvider = {
   finish: () => Promise.reject(new Error('identity provider not available in this test')),
 };
 
+/** Stands in for the files the runner builds once for every app (React, the SDK, the UI kit). */
+const fakeVendor = {
+  async get(name: string): Promise<VendorAsset | undefined> {
+    if (name !== 'sdk.js') return undefined;
+    return { body: new TextEncoder().encode('export {};'), type: 'text/javascript; charset=utf-8', etag: '"test"' };
+  },
+  warm: () => Promise.resolve(),
+};
+
 export interface TestContext {
   deps: Deps;
   app: Hono;
   push: FakePush;
   clock: { now: Date };
+  /** URL prefix of the demo app's published files, e.g. "/assets/0123456789abcdef". */
+  assets: string;
   cleanup: () => void;
 }
 
-export function setup(options: { env?: Record<string, string>; identity?: IdentityProvider } = {}): TestContext {
+/** Publishes a version without building anything: enough for everything that is not about the build. */
+export function publishFake(apps: AppStore, slug: string, name: string): void {
+  apps.publish(
+    slug,
+    { 'app.json': JSON.stringify({ name }), 'web/main.tsx': 'export default () => null;' },
+    {
+      manifest: { name, description: '', themeColor: null, backgroundColor: null },
+      web: { js: `console.log(${JSON.stringify(slug)});`, css: 'body{}' },
+      server: null,
+      migrations: [],
+    },
+    null,
+  );
+}
+
+export function setup(
+  options: { env?: Record<string, string>; identity?: IdentityProvider; limits?: Limits } = {},
+): TestContext {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'socle-test-'));
   const config = testConfig({ DATA_DIR: dataDir, ...options.env });
   const db = openDatabase(':memory:');
-  syncDemoApp(db, true);
+  // Worker processes only start if a test builds an app or calls a function.
+  const runner = localRunner({ appsDir: path.join(dataDir, 'apps'), limits: options.limits ?? DEFAULT_LIMITS });
+  const apps = new AppStore(db, runner);
+  const live = new LiveHub();
+  apps.onPublish = (slug) => live.publish(slug, 'version');
+  publishFake(apps, 'demo', 'Démo');
+  // A second app, registered but without a published version.
   run(db, `INSERT INTO apps (slug, name, created_at) VALUES ('notes', 'Notes', :now)`, {
     now: new Date().toISOString(),
   });
   const push = new FakePush();
   const clock = { now: new Date() };
-  const deps: Deps = { config, db, identity: options.identity ?? unusedIdentity, push, now: () => clock.now };
+  const deps: Deps = {
+    config,
+    db,
+    identity: options.identity ?? unusedIdentity,
+    push,
+    runner,
+    apps,
+    live,
+    vendor: fakeVendor,
+    now: () => clock.now,
+  };
   return {
     deps,
     app: createApp(deps),
     push,
     clock,
+    assets: `/assets/${apps.live('demo')!.assetHash}`,
     cleanup: () => {
+      live.closeAll();
       db.close();
-      rmSync(dataDir, { recursive: true, force: true });
+      void runner.close().finally(() => rmSync(dataDir, { recursive: true, force: true }));
     },
   };
 }

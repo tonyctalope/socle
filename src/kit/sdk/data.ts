@@ -25,7 +25,7 @@ async function callFunction(name: string, input: unknown, queryOnly: boolean): P
 }
 
 /** Every server function of the app: `await api.addExpense({ label, cents })`. Throws an ApiError. */
-export const api: Record<string, (input?: unknown) => Promise<any>> = new Proxy(
+export const api: { readonly [name: string]: any } = new Proxy(
   {},
   { get: (_target, name) => (input?: unknown) => callFunction(String(name), input, false) },
 );
@@ -144,7 +144,8 @@ export function useQuery<T = unknown>(name: string, input?: unknown, options?: {
 let stream: EventSource | undefined;
 let hiddenAt = 0;
 
-function listen(): void {
+/** Opens the live-update stream of this page (once). */
+export function listen(): void {
   if (stream || typeof EventSource === 'undefined') return;
   let opened = false;
   stream = new EventSource('/_socle/api/events');
@@ -157,6 +158,8 @@ function listen(): void {
     }
     if (from !== CLIENT) refreshAll();
   });
+  // A new version of the app was published: this page runs the old one.
+  stream.addEventListener('version', () => location.reload());
   stream.addEventListener('open', () => {
     // After a reconnection, changes may have been missed.
     if (opened) refreshAll();

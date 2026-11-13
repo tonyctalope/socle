@@ -26,6 +26,8 @@ export interface Runner {
   vendor(): Promise<VendorFiles>;
   migrate(database: string, migrations: Migration[]): Promise<MigrateResult>;
   call(request: CallRequest): Promise<CallResult>;
+  /** Copies an app database next to it (one copy per day, the last `keep` are kept). */
+  backup(database: string, date: string, keep: number): Promise<JobResult<{ type: 'backup' } & Job>>;
   healthy(): Promise<boolean>;
   close(): Promise<void>;
 }
@@ -42,6 +44,7 @@ function runner(send: Send, healthy: () => Promise<boolean>, close: () => Promis
     build: (files) => run({ type: 'build', files }),
     vendor: () => run({ type: 'vendor' }),
     migrate: (database, migrations) => run({ type: 'migrate', database, migrations }),
+    backup: (database, date, keep) => run({ type: 'backup', database, date, keep }),
     async call(callRequest) {
       try {
         return await run({ type: 'call', request: callRequest });

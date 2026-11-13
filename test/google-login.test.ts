@@ -167,6 +167,7 @@ describe('Google sign-in (OIDC) and the e-mail allowlist', () => {
     const { ctx, browser } = start();
     const tables = all<{ name: string }>(ctx.deps.db, "SELECT name FROM sqlite_master WHERE type = 'table'");
     assert.deepEqual(tables.map((table) => table.name).sort(), [
+      'app_versions',
       'apps',
       'push_subscriptions',
       'sessions',

@@ -1,5 +1,5 @@
-import type { UserRow } from '../auth/users.ts';
-import { all, get, run, type Db } from '../db/database.ts';
+import { displayName, type UserRow } from '../auth/users.ts';
+import { all, get, type Db } from '../db/database.ts';
 
 export interface AppRow {
   slug: string;
@@ -8,6 +8,8 @@ export interface AppRow {
   theme_color: string;
   background_color: string;
   created_at: string;
+  /** The published version (app_versions.id), or null while the app has none. */
+  live_version: number | null;
 }
 
 export const DEMO_SLUG = 'demo';
@@ -28,20 +30,9 @@ export function canAccess(_user: UserRow, _app: AppRow): boolean {
   return true;
 }
 
-/** The built-in demo app exists exactly while DEMO_APP is on. */
-export function syncDemoApp(db: Db, enabled: boolean): void {
-  if (!enabled) {
-    run(db, 'DELETE FROM apps WHERE slug = :slug', { slug: DEMO_SLUG });
-    return;
-  }
-  run(
-    db,
-    `INSERT INTO apps (slug, name, description, created_at) VALUES (:slug, 'Démo', :description, :now)
-     ON CONFLICT(slug) DO NOTHING`,
-    {
-      slug: DEMO_SLUG,
-      description: 'Vérifie la connexion, l’installation sur l’écran d’accueil et les notifications.',
-      now: new Date().toISOString(),
-    },
-  );
+/** Everyone who can open an app, as apps see them: an id and a display name, never the e-mail address. */
+export function appMembers(db: Db, app: AppRow, isAllowed: (email: string) => boolean): { id: number; name: string }[] {
+  return all<UserRow>(db, 'SELECT * FROM users ORDER BY id')
+    .filter((user) => isAllowed(user.email) && canAccess(user, app))
+    .map((user) => ({ id: user.id, name: displayName(user) }));
 }

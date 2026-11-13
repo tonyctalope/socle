@@ -87,13 +87,20 @@ describe('what an app page is allowed to do', () => {
   it('sends the policy with every response, so workers and stray documents are confined too', async () => {
     const { ctx, browser } = await signedIn();
     // A worker takes its policy from its own script response; an image or JSON file can be opened as a document.
-    for (const path of ['/assets/main.js', '/assets/style.css', '/_socle/api/me', '/_socle/sdk.js', '/_socle/sw.js']) {
+    const paths = [
+      `${ctx.assets}/main.js`,
+      `${ctx.assets}/style.css`,
+      '/_socle/api/me',
+      '/_socle/vendor/sdk.js',
+      '/_socle/sw.js',
+    ];
+    for (const path of paths) {
       const response = await browser.request(`${DEMO}${path}`);
       assert.equal(response.status, 200, path);
       const csp = response.headers.get('content-security-policy') ?? '';
       assert.ok(csp.includes("connect-src 'self'") && csp.includes("script-src 'self'"), path);
     }
-    const anonymous = await new Browser(ctx.app).request(`${DEMO}/assets/main.js`);
+    const anonymous = await new Browser(ctx.app).request(`${DEMO}${ctx.assets}/main.js`);
     assert.match(anonymous.headers.get('content-security-policy') ?? '', /default-src 'self'/); // errors as well
     ctx.cleanup();
   });
@@ -114,8 +121,8 @@ describe('what an app page is allowed to do', () => {
   it('only lets the platform service worker be registered', async () => {
     const { ctx, browser } = await signedIn();
     const asWorker = { 'service-worker': 'script' };
-    assert.equal((await browser.request(`${DEMO}/assets/main.js`, { headers: asWorker })).status, 403);
-    assert.equal((await browser.request(`${DEMO}/_socle/sdk.js`, { headers: asWorker })).status, 403);
+    assert.equal((await browser.request(`${DEMO}${ctx.assets}/main.js`, { headers: asWorker })).status, 403);
+    assert.equal((await browser.request(`${DEMO}/_socle/vendor/sdk.js`, { headers: asWorker })).status, 403);
     const worker = await browser.request(`${DEMO}/_socle/sw.js`, { headers: asWorker });
     assert.equal(worker.status, 200);
     assert.equal(worker.headers.get('service-worker-allowed'), '/');
@@ -131,7 +138,7 @@ describe('what is reachable without signing in', () => {
     for (const path of [
       '/_socle/manifest.webmanifest',
       '/_socle/sw.js',
-      '/_socle/sdk.js',
+      '/_socle/vendor/sdk.js',
       '/_socle/icons/icon-192.png',
     ]) {
       assert.equal((await anonymous.request(`${DEMO}${path}`)).status, 200, path);
@@ -145,8 +152,10 @@ describe('what is reachable without signing in', () => {
     assert.equal(manifest.scope, '/');
     assert.equal(manifest.icons.length, 4);
 
-    assert.equal((await anonymous.request(`${DEMO}/assets/main.js`)).status, 401);
+    assert.equal((await anonymous.request(`${DEMO}${ctx.assets}/main.js`)).status, 401);
     assert.equal((await anonymous.fetch(`${DEMO}/_socle/api/me`)).status, 401);
+    assert.equal((await anonymous.fetch(`${DEMO}/_socle/api/fn/list`, { method: 'POST', json: {} })).status, 401);
+    assert.equal((await anonymous.fetch(`${DEMO}/_socle/api/events`)).status, 401);
     assert.equal((await anonymous.fetch(`${DEMO}/_socle/api/logout`, { method: 'POST' })).status, 401);
     assert.equal((await anonymous.request(`${DEMO}/`, { headers: { accept: 'text/html' } })).status, 302);
     ctx.cleanup();
@@ -165,11 +174,18 @@ describe('what is reachable without signing in', () => {
 
   it('serves the app files to its members only, and 404s the rest', async () => {
     const { ctx, browser } = await signedIn();
-    const script = await browser.request(`${DEMO}/assets/main.js`);
+    const script = await browser.request(`${DEMO}${ctx.assets}/main.js`);
     assert.equal(script.status, 200);
     assert.match(script.headers.get('content-type')!, /^text\/javascript/);
-    assert.equal((await browser.request(`${DEMO}/assets/../../package.json`)).status, 404);
-    assert.equal((await browser.request(`${DEMO}/assets/missing.js`)).status, 404);
+    assert.match(script.headers.get('cache-control')!, /^private, .*immutable$/);
+    assert.equal((await browser.request(`${DEMO}${ctx.assets}/style.css`)).status, 200);
+    assert.equal((await browser.request(`${DEMO}${ctx.assets}/../../package.json`)).status, 404);
+    assert.equal((await browser.request(`${DEMO}${ctx.assets}/missing.js`)).status, 404);
+    assert.equal((await browser.request(`${DEMO}/assets/0000000000000000/main.js`)).status, 404);
+    assert.equal((await browser.request(`${DEMO}/assets/main.js`)).status, 404);
+    assert.equal((await browser.request(`${DEMO}/_socle/vendor/missing.js`)).status, 404);
+    // Another app's files are not reachable under this app's host, even by their exact address.
+    assert.equal((await browser.request(`${NOTES}${ctx.assets}/main.js`)).status, 404);
     assert.equal((await browser.request(`${DEMO}/_socle/unknown`)).status, 404);
     // An app without a published version shows a message instead of an empty shell.
     const empty = await browser.navigate(`${NOTES}/`);

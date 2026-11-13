@@ -1,5 +1,6 @@
 import { Component, type ComponentType, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { listen } from './data.ts';
 
 /** Shown instead of a blank page when the app's code throws while rendering. */
 class ErrorScreen extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -35,6 +36,7 @@ class ErrorScreen extends Component<{ children: ReactNode }, { error: Error | nu
 export function start(App: ComponentType): void {
   const root = document.getElementById('root');
   if (!root) throw new Error('socle: this page was not served by the platform');
+  listen();
   createRoot(root).render(
     <ErrorScreen>
       <App />

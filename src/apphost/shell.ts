@@ -1,12 +1,33 @@
-import { html } from 'hono/html';
+import { html, raw } from 'hono/html';
 import type { AppRow } from '../apps/registry.ts';
+
+/** What the platform tells the app's code about who is looking at it (read by @socle/sdk). */
+export interface BootData {
+  user: { id: number; name: string };
+  app: { slug: string; name: string };
+  members: { id: number; name: string }[];
+  push: { publicKey: string };
+}
+
+const VENDOR = '/_socle/vendor';
+/** Fetched in parallel with the app's own script instead of one after the other. */
+const PRELOADED = ['react.js', 'react-jsx-runtime.js', 'react-dom.js', 'sdk.js', 'ui.js'];
+
+/** JSON that can sit inside a <script> element: nothing in it can close the element or start markup. */
+function embeddedJson(value: unknown): string {
+  return JSON.stringify(value).replace(
+    /[<>&\u2028\u2029]/g,
+    (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  );
+}
 
 /**
  * The HTML document of an app. Apps never write it themselves: the platform owns the
- * <head> (manifest, icons, theme), so every app installs the same way and no inline
- * script is ever needed.
+ * <head> (manifest, icons, theme) and the loading of scripts, so every app installs
+ * the same way and no inline script is ever needed. The boot data is a JSON block:
+ * browsers do not execute it, the SDK reads it.
  */
-export function shellPage(app: AppRow, entry: { script: string; style: string | null }) {
+export function shellPage(app: AppRow, assetHash: string, boot: BootData) {
   return html`<!doctype html>
     <html lang="fr">
       <head>
@@ -24,12 +45,17 @@ export function shellPage(app: AppRow, entry: { script: string; style: string | 
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-title" content="${app.name}" />
         <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-        ${entry.style ? html`<link rel="stylesheet" href="${entry.style}" />` : ''}
+        <link rel="stylesheet" href="${VENDOR}/ui.css" />
+        <link rel="stylesheet" href="/assets/${assetHash}/style.css" />
+        ${PRELOADED.map((file) => html`<link rel="modulepreload" href="${VENDOR}/${file}" />`)}
       </head>
       <body>
         <div id="root"></div>
         <noscript>${app.name} a besoin de JavaScript pour fonctionner.</noscript>
-        <script type="module" src="${entry.script}"></script>
+        <script id="socle-boot" type="application/json">
+          ${raw(embeddedJson(boot))}
+        </script>
+        <script type="module" src="/assets/${assetHash}/main.js"></script>
       </body>
     </html>`;
 }

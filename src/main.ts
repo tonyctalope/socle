@@ -2,15 +2,20 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { serve } from '@hono/node-server';
 import { createApp } from './app.ts';
-import { syncDemoApp } from './apps/registry.ts';
+import { LiveHub } from './apphost/live.ts';
+import { VendorCache } from './apphost/vendor.ts';
+import { syncDemoApp } from './apps/demo.ts';
+import { AppStore } from './apps/store.ts';
 import { createGoogleProvider } from './auth/google.ts';
-import { appOrigin, ConfigError, loadConfig } from './config.ts';
+import { appOrigin, ConfigError, loadConfig, type Config } from './config.ts';
 import { openDatabase } from './db/database.ts';
 import { startJobs } from './jobs.ts';
 import { createPushService } from './push/push.ts';
+import { localRunner, remoteRunner } from './runner/client.ts';
+import { DEFAULT_LIMITS } from './runner/limits.ts';
 import type { Deps } from './types.ts';
 
-let config;
+let config: Config;
 try {
   config = loadConfig();
 } catch (error) {
@@ -23,14 +28,43 @@ try {
 
 mkdirSync(config.dataDir, { recursive: true });
 const db = openDatabase(path.join(config.dataDir, 'socle.db'));
-syncDemoApp(db, config.demoApp);
+// What agents write is built and run by the runner: another container in production,
+// worker processes of this one in development.
+const runner = config.runnerSocket
+  ? remoteRunner(config.runnerSocket, DEFAULT_LIMITS)
+  : localRunner({ appsDir: path.join(config.dataDir, 'apps'), limits: DEFAULT_LIMITS });
+const apps = new AppStore(db, runner);
+const live = new LiveHub();
+// Open pages of an app reload when a new version of it is published.
+apps.onPublish = (slug) => live.publish(slug, 'version');
 const deps: Deps = {
   config,
   db,
   identity: createGoogleProvider(config),
   push: createPushService(db, config),
+  runner,
+  apps,
+  live,
+  vendor: new VendorCache(runner),
   now: () => new Date(),
 };
+
+/** Needs the runner, which may start after this process: keep trying, the rest of the platform works meanwhile. */
+async function prepareApps(attempt = 1): Promise<void> {
+  try {
+    const outcome = await syncDemoApp(db, apps, config.demoApp);
+    if (outcome && !outcome.ok) {
+      console.error(`demo app not published (${outcome.stage}):`, JSON.stringify(outcome.problems));
+    } else if (outcome && !outcome.unchanged) {
+      console.info(`demo app published (version ${outcome.versionId})`);
+    }
+    await deps.vendor.warm();
+  } catch (error) {
+    if (stopping) return;
+    if (attempt === 1 || attempt % 12 === 0) console.warn(`runner not ready (${(error as Error).message}), retrying`);
+    setTimeout(() => void prepareApps(attempt + 1), 5_000).unref();
+  }
+}
 
 const app = createApp(deps);
 const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
@@ -39,16 +73,18 @@ const server = serve({ fetch: app.fetch, port: config.port, hostname: config.hos
   );
 });
 const stopJobs = startJobs(deps);
-
 let stopping = false;
+void prepareApps();
+
 const shutdown = (signal: string) => {
   if (stopping) return;
   stopping = true;
   console.info(`${signal} received, shutting down`);
   stopJobs();
+  live.closeAll();
   server.close(() => {
     db.close();
-    process.exit(0);
+    void runner.close().finally(() => process.exit(0));
   });
   setTimeout(() => process.exit(0), 5_000).unref();
 };

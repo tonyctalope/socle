@@ -15,7 +15,7 @@ export type Reply<J extends Job = Job> =
   | { ok: true; result: JobResult<J> }
   | { ok: false; failure: { code: PoolFailure['code'] | 'invalid'; message: string } };
 
-const JOB_TYPES = new Set(['call', 'build', 'migrate', 'vendor', 'warm']);
+const JOB_TYPES = new Set(['call', 'build', 'migrate', 'vendor', 'backup', 'warm']);
 
 export async function answer(pool: WorkerPool, job: unknown): Promise<Reply> {
   if (typeof job !== 'object' || job === null || !JOB_TYPES.has((job as { type?: string }).type ?? '')) {

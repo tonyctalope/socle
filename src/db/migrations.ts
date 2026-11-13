@@ -71,4 +71,27 @@ export const MIGRATIONS: readonly string[] = [
     value TEXT NOT NULL
   );
   `,
+
+  /* 2 — apps become versions of source files, built by the runner */ `
+  -- What an agent sent (files) and what the runner made of it. A version is never
+  -- edited; publishing an app points apps.live_version at one of its versions.
+  CREATE TABLE app_versions (
+    id INTEGER PRIMARY KEY,
+    app TEXT NOT NULL REFERENCES apps(slug) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    source_hash TEXT NOT NULL,
+    asset_hash TEXT NOT NULL,
+    files TEXT NOT NULL,
+    manifest TEXT NOT NULL,
+    web_js TEXT NOT NULL,
+    web_css TEXT NOT NULL,
+    server_bundle TEXT,
+    functions TEXT NOT NULL,
+    migrations TEXT NOT NULL
+  );
+  CREATE INDEX app_versions_app ON app_versions(app, id);
+  CREATE INDEX app_versions_assets ON app_versions(app, asset_hash);
+  ALTER TABLE apps ADD COLUMN live_version INTEGER REFERENCES app_versions(id) ON DELETE SET NULL;
+  `,
 ];

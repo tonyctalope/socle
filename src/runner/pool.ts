@@ -51,7 +51,7 @@ export class WorkerPool {
   killed = 0;
 
   constructor(options: PoolOptions) {
-    this.options = { size: 2, maxQueue: 200, ...options };
+    this.options = { ...options, size: options.size ?? 2, maxQueue: options.maxQueue ?? 200 };
   }
 
   run<J extends Job>(job: J): Promise<JobResult<J>> {

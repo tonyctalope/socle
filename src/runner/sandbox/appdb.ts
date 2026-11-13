@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { constants, DatabaseSync } from 'node:sqlite';
 import type { Limits } from '../limits.ts';
@@ -326,6 +326,34 @@ export function applyMigrations(connection: Connection, migrations: readonly Mig
     }
     throw error;
   }
+}
+
+/**
+ * A consistent copy of an app database next to it (backups/<name>-<date>.db), one per
+ * day, keeping the last `keep`. Returns the file written, or null when there was nothing to do.
+ */
+export function backupDatabase(appsDir: string, database: string, date: string, keep: number): string | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new SqlRefused(`invalid backup date: ${date}`);
+  const file = databaseFile(appsDir, database);
+  if (!existsSync(file)) return null;
+  const dir = path.join(path.dirname(file), 'backups');
+  const name = path.basename(file, '.db');
+  const target = path.join(dir, `${name}-${date}.db`);
+  if (existsSync(target)) return null;
+  mkdirSync(dir, { recursive: true });
+  const db = new DatabaseSync(file, { readOnly: true, timeout: 5_000 });
+  try {
+    db.prepare('VACUUM INTO ?').run(target);
+  } finally {
+    db.close();
+  }
+  const dated = new RegExp(`^${name}-\\d{4}-\\d{2}-\\d{2}\\.db$`);
+  const old = readdirSync(dir)
+    .filter((entry) => dated.test(entry))
+    .sort()
+    .slice(0, -Math.max(1, keep));
+  for (const entry of old) rmSync(path.join(dir, entry), { force: true });
+  return target;
 }
 
 /** What went wrong with a statement, in words its author can act on. */
