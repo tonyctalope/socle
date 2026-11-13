@@ -111,7 +111,7 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
         problems: outcome.problems,
         next:
           outcome.stage === 'migrate'
-            ? 'The files are saved but the draft database refused a migration. If you rewrote a migration that had already run in the draft, call write_files again with reset_draft_data: true; otherwise fix the SQL.'
+            ? 'The files are saved but the draft database refused a migration. If you rewrote or removed a migration that had already run in the draft and is not published yet, call write_files again with reset_draft_data: true; otherwise fix the SQL.'
             : 'The files are saved but do not build. Fix the problems and call write_files again; the draft address still shows the last version that built.',
       });
     }

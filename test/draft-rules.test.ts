@@ -289,7 +289,6 @@ describe('operations on a draft, when they overlap or fail', () => {
     assert.deepEqual(await ctx.deps.runner.migrate('tasks/draft', migrations('001_init.sql')), {
       ok: true,
       applied: [],
-      unknown: [],
     });
     // The same migration name can be used again, with other SQL.
     const other = tasks('two', { 'migrations/002_done.sql': 'ALTER TABLE tasks ADD COLUMN note TEXT;' });
@@ -312,7 +311,6 @@ describe('operations on a draft, when they overlap or fail', () => {
     assert.deepEqual(await ctx.deps.runner.migrate('tasks/live', migrations('001_init.sql', '002_done.sql')), {
       ok: true,
       applied: [],
-      unknown: [],
     });
   });
 

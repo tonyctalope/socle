@@ -327,8 +327,6 @@ export interface Migration {
 export interface MigrationOutcome {
   /** Names applied by this call. */
   applied: string[];
-  /** Already in the database but absent from the list (the database is ahead of this version). */
-  unknown: string[];
 }
 
 export class MigrationError extends Error {
@@ -370,7 +368,9 @@ function dropEverything(db: DatabaseSync): void {
 
 /**
  * Brings an app database up to date. New migrations apply together or not at all;
- * one that was already applied must not have changed since.
+ * one that was already applied must not have changed since, nor have left the list: the
+ * database then has exactly the migrations it was given, which is what lets two versions
+ * with the same list be told to expect the same data.
  */
 export function applyMigrations(
   connection: Connection,
@@ -403,6 +403,13 @@ export function applyMigrations(
         }[]
       ).map((row) => [row.name, row.checksum]),
     );
+    const gone = [...done.keys()].filter((name) => !names.includes(name)).sort()[0];
+    if (gone !== undefined) {
+      throw new MigrationError(
+        gone,
+        'this migration was already applied and its file is gone: a migration is never removed, put it back as it was (what it did is undone by a new migration)',
+      );
+    }
     const record = db.prepare(`INSERT INTO ${PLATFORM_PREFIX}migrations (name, checksum, applied_at) VALUES (?, ?, ?)`);
     const applied: string[] = [];
     const last = [...done.keys()].sort().at(-1);
@@ -471,7 +478,7 @@ export function applyMigrations(
       }
     }
     db.exec('COMMIT');
-    return { applied, unknown: [...done.keys()].filter((name) => !names.includes(name)).sort() };
+    return { applied };
   } catch (error) {
     try {
       db.exec('ROLLBACK');

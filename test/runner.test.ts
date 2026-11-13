@@ -54,7 +54,7 @@ async function deploy(runner: Runner, app: string) {
   assert.ok(built.ok, JSON.stringify(built));
   const database = `${app}/live`;
   const migrated = await runner.migrate(database, built.app.migrations);
-  assert.deepEqual(migrated, { ok: true, applied: ['001_init.sql'], unknown: [] });
+  assert.deepEqual(migrated, { ok: true, applied: ['001_init.sql'] });
   const bundleHash = await runner.install(app, built.app.server!.bundle);
   const call = (fn: string, input: unknown = null) =>
     runner.call({
@@ -98,7 +98,12 @@ describe('the runner, as the web process uses it', () => {
     assert.ok(!outcome.ok);
     assert.equal(outcome.problems[0]!.file, 'web/main.tsx');
     assert.match(outcome.problems[0]!.message, /"lodash" is not available: apps cannot install packages/);
-    const broken = await runner.migrate('basic/live', [{ name: '002.sql', sql: 'CREATE TABLE notes (again)' }]);
+    const built = await runner.build(SOURCE);
+    assert.ok(built.ok);
+    const broken = await runner.migrate('basic/live', [
+      ...built.app.migrations,
+      { name: '002.sql', sql: 'CREATE TABLE notes (again)' },
+    ]);
     assert.deepEqual(broken, { ok: false, migration: '002.sql', message: 'table notes already exists' });
   });
 

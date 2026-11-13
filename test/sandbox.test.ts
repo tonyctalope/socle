@@ -805,8 +805,8 @@ describe('migrations', () => {
 
   it('apply once, in order, and all together', async () => {
     const first = { '001_init.sql': SCHEMA };
-    assert.deepEqual(migrate('migr/live', first), { applied: ['001_init.sql'], unknown: [] });
-    assert.deepEqual(migrate('migr/live', first), { applied: [], unknown: [] });
+    assert.deepEqual(migrate('migr/live', first), { applied: ['001_init.sql'] });
+    assert.deepEqual(migrate('migr/live', first), { applied: [] });
 
     const second = {
       ...first,
@@ -828,7 +828,7 @@ describe('migrations', () => {
     assert.deepEqual(value(await call('tables')), ['notes']);
 
     const fixed = { ...second, '003_broken.sql': "INSERT INTO tags (name) VALUES ('ok')" };
-    assert.deepEqual(migrate('migr/live', fixed), { applied: ['002_tags.sql', '003_broken.sql'], unknown: [] });
+    assert.deepEqual(migrate('migr/live', fixed), { applied: ['002_tags.sql', '003_broken.sql'] });
     assert.deepEqual(value(await call('tables')), ['notes', 'tags']);
   });
 
@@ -849,14 +849,20 @@ describe('migrations', () => {
       (error) =>
         error instanceof MigrationError && error.migration === '002_late.sql' && /later name/.test(error.message),
     );
-    // An older version of the app (after a rollback) simply knows fewer migrations.
-    assert.deepEqual(migrate('edited/live', { '001_init.sql': SCHEMA }), { applied: [], unknown: ['003_more.sql'] });
+    // Nor may one that ran leave the list: the data would no longer be what the files say.
+    assert.throws(
+      () => migrate('edited/live', { '001_init.sql': SCHEMA }),
+      (error) =>
+        error instanceof MigrationError && error.migration === '003_more.sql' && /its file is gone/.test(error.message),
+    );
+    assert.deepEqual(migrate('edited/live', { '001_init.sql': SCHEMA, '003_more.sql': 'CREATE TABLE more (x)' }), {
+      applied: [],
+    });
   });
 
   it('can do what a schema needs', async () => {
-    assert.deepEqual(
-      migrate('rich/live', {
-        '001.sql': `
+    const rich = {
+      '001.sql': `
           CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
           CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL, owner INTEGER REFERENCES people(id) ON DELETE SET NULL, done INTEGER NOT NULL DEFAULT 0);
           CREATE INDEX tasks_owner ON tasks(owner);
@@ -864,16 +870,15 @@ describe('migrations', () => {
           CREATE TRIGGER tasks_touch AFTER UPDATE ON tasks BEGIN UPDATE people SET name = name WHERE id = NEW.owner; END;
           INSERT INTO people (name) VALUES ('Bob'), ('Alice');
           INSERT INTO tasks (title, owner) VALUES ('Poubelles', 1);`,
-        '002.sql': `
+      '002.sql': `
           ALTER TABLE tasks ADD COLUMN due TEXT;
           ALTER TABLE tasks RENAME COLUMN title TO label;
           ALTER TABLE people RENAME TO members;
           CREATE TABLE scratch (x); DROP TABLE scratch;
           DROP INDEX tasks_owner; CREATE INDEX tasks_owner ON tasks(owner, done);
           ANALYZE;`,
-      }).applied,
-      ['001.sql', '002.sql'],
-    );
+    };
+    assert.deepEqual(migrate('rich/live', rich).applied, ['001.sql', '002.sql']);
     const { call } = await app(
       'rich',
       `
@@ -881,7 +886,7 @@ describe('migrations', () => {
       export const finish = mutation(({ db }, { id }) => db.run('UPDATE tasks SET done = 1 WHERE id = ?', id).changes);
       export const orphan = mutation(({ db }) => db.run("INSERT INTO tasks (label, owner) VALUES ('x', 999)"));
     `,
-      {},
+      rich,
     );
     assert.deepEqual(value(await call('open')), [{ label: 'Poubelles', owner: 'Bob' }]);
     assert.equal(value(await call('finish', { id: 1 })), 1);
@@ -924,7 +929,7 @@ describe('migrations', () => {
       );
     }
     assert.ok(!existsSync(path.join(dir, 'stolen-by-migration.db')));
-    assert.deepEqual(migrate('strict/live', { '001.sql': SCHEMA }), { applied: ['001.sql'], unknown: [] });
+    assert.deepEqual(migrate('strict/live', { '001.sql': SCHEMA }), { applied: ['001.sql'] });
   });
 
   it('keep a schema within bounds', () => {
@@ -940,7 +945,6 @@ describe('migrations', () => {
     // Refused as a whole: the database is as it was, and a schema that fits goes through.
     assert.deepEqual(migrate('wide/live', { '001.sql': 'CREATE TABLE one (x)' }, tight), {
       applied: ['001.sql'],
-      unknown: [],
     });
     const long = `CREATE TABLE big (${Array.from({ length: 150 }, (_, index) => `column_with_a_long_name_${index} TEXT`).join(', ')});`;
     assert.throws(

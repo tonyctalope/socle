@@ -258,4 +258,47 @@ describe('one app, in the administration', () => {
     );
     assert.equal((await admin.request(`${CONTROL}/icons/app/nope`)).status, 200);
   });
+
+  it('refuses files that lost a migration the data already ran', async () => {
+    apps().create('ledger', { name: 'Ledger', description: '' }, { id: adminId });
+    const save = (files: Record<string, string>, options?: { resetData?: boolean }) =>
+      apps().saveDraft('ledger', files, { id: adminId }, options);
+    const publishNow = () => apps().publishDraft('ledger', apps().status('ledger')!.draft.versionId);
+    const renamed = tasks('two', { 'migrations/002_rename.sql': 'ALTER TABLE tasks RENAME TO chores;' });
+    const { 'migrations/002_rename.sql': _gone, ...without } = renamed;
+
+    assert.ok((await save(tasks('one'))).ok);
+    const first = await publishNow();
+    assert.ok(first.ok);
+
+    // The draft's data ran 002: files without it no longer describe that data, and are refused
+    // rather than built on a schema nothing else will ever have.
+    assert.ok((await save(renamed)).ok);
+    const dropped = await save(without);
+    assert.ok(!dropped.ok && dropped.stage === 'migrate', JSON.stringify(dropped));
+    assert.equal(dropped.problems[0]!.file, 'migrations/002_rename.sql');
+    assert.match(dropped.problems[0]!.message, /its file is gone/);
+    // Starting the draft's data again makes the two agree.
+    assert.ok((await save(without, { resetData: true })).ok);
+
+    // Once published, a migration is there for good: no later version leaves it out.
+    assert.ok((await save(renamed)).ok);
+    const second = await publishNow();
+    assert.ok(second.ok, JSON.stringify(second));
+    assert.ok((await save(without, { resetData: true })).ok);
+    const refused = await publishNow();
+    assert.ok(!refused.ok && refused.stage === 'migrate', JSON.stringify(refused));
+    assert.match(refused.problems[0]!.message, /its file is gone/);
+    assert.equal(apps().status('ledger')!.live?.versionId, second.versionId);
+    // So two versions with the same list of migrations do expect the same data, and the
+    // version from before the rename cannot come back onto renamed tables.
+    const versions = apps().versions('ledger');
+    assert.deepEqual(
+      versions.map((version) => [version.id, version.canReturn]),
+      [
+        [second.versionId, false],
+        [first.versionId, false],
+      ],
+    );
+  });
 });
