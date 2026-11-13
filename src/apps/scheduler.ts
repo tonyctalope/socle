@@ -12,19 +12,11 @@ import { siteOf } from './slug.ts';
 // function is called. An occurrence that passed while the platform was down runs once
 // when it is back; older ones are not replayed.
 
-const DAY_MS = 24 * 3600 * 1000;
-const WEEKDAY_NAMES: Record<string, Weekday> = {
-  Mon: 'monday',
-  Tue: 'tuesday',
-  Wed: 'wednesday',
-  Thu: 'thursday',
-  Fri: 'friday',
-  Sat: 'saturday',
-  Sun: 'sunday',
-};
+/** In the order of `Date.getUTCDay()`. */
+const WEEKDAYS: Weekday[] = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 
-/** The date, time and day of the week it is for the members (APP_TIMEZONE). */
-function localParts(timezone: string, at: Date): { date: string; hour: string; time: string; weekday: Weekday } {
+/** The date and time it is for the members (APP_TIMEZONE). */
+function localParts(timezone: string, at: Date): { date: string; hour: string; time: string } {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: timezone,
     year: 'numeric',
@@ -32,7 +24,6 @@ function localParts(timezone: string, at: Date): { date: string; hour: string; t
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
-    weekday: 'short',
     hourCycle: 'h23',
   }).formatToParts(at);
   const part = (type: string) => parts.find((entry) => entry.type === type)?.value ?? '';
@@ -40,7 +31,6 @@ function localParts(timezone: string, at: Date): { date: string; hour: string; t
     date: `${part('year')}-${part('month')}-${part('day')}`,
     hour: part('hour'),
     time: `${part('hour')}:${part('minute')}`,
-    weekday: WEEKDAY_NAMES[part('weekday')]!,
   };
 }
 
@@ -51,11 +41,13 @@ function localParts(timezone: string, at: Date): { date: string; hour: string; t
 export function slotOf(schedule: Schedule, timezone: string, now: Date): string {
   const today = localParts(timezone, now);
   if (schedule.every === 'hour') return `${today.date}T${today.hour}`;
-  // Going back one day at a time until the day and the time fit: today if its time has come.
-  for (let back = 0; back <= 7; back++) {
-    const day = back === 0 ? today : localParts(timezone, new Date(now.getTime() - back * DAY_MS));
-    const reached = back > 0 || today.time >= schedule.at;
-    if (reached && (schedule.every === 'day' || day.weekday === schedule.on)) return day.date;
+  // Going back one day of the calendar at a time until the day and the time fit: today if its
+  // time has come. Dates are counted as dates, not as 24 hours: the day the clocks change is
+  // 23 or 25 hours long.
+  const [year, month, dayOfMonth] = today.date.split('-').map(Number) as [number, number, number];
+  for (let back = today.time >= schedule.at ? 0 : 1; back <= 7; back++) {
+    const day = new Date(Date.UTC(year, month - 1, dayOfMonth - back));
+    if (schedule.every === 'day' || WEEKDAYS[day.getUTCDay()] === schedule.on) return day.toISOString().slice(0, 10);
   }
   return today.date; // not reachable: a week always holds the day asked for
 }
@@ -101,8 +93,9 @@ export async function runSchedules(deps: Deps): Promise<number> {
         inputJson: 'null',
         caller: null,
       });
-      if (typeof result === 'string') {
-        // The platform could not make the call at all (no place, no runner): try again next minute.
+      if (typeof result === 'string' || (!result.ok && result.error.code === 'busy')) {
+        // The platform could not make the call at all (no place, no runner, every worker of the
+        // runner taken): the function did not start, so try again next minute.
         remember(known.slot);
         continue;
       }

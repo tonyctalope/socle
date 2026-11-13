@@ -71,12 +71,17 @@ the sandbox load: `src/kit`, `src/demo`).
   two never share anything; `c.get('site')` on an app host says which one a request is for.
 - `src/apps/scheduler.ts` — scheduled functions (`schedule({ every, at, on, handler })`): every minute, for the
   published version of each app, the latest occurrence that has come is run once, as a mutation without a caller
-  (`user` null). The occurrence is written down (`app_schedules`) before the call; a schedule seen for the first
-  time starts with its next occurrence; screens and tools cannot call a scheduled function.
+  (`user` null). The occurrence is written down (`app_schedules`) before the call, and taken back when the call
+  never started (no place, no runner, every worker taken); a schedule seen for the first time starts with its
+  next occurrence; days are counted as dates, not as 24 hours (the clocks change); screens and tools cannot call
+  a scheduled function.
 - `src/files/store.ts` — the files members add to an app (photos, documents): kept by the web process under
   `DATA_DIR/files/<label>/` (one folder per address: a draft's files are not the published app's), recognised
   from their first bytes (JPEG, PNG, WebP, GIF, PDF; never SVG or HTML), bounded per file and per address, served
-  to that address's sessions only. The browser sends them (`files.upload*` in the SDK); a mutation deletes one
+  to that address's sessions only: read from the disk as the reader takes them (never held whole in memory), and
+  asked for again by the browser each time (`no-cache` and an ETag: a copy it kept is only shown to someone who
+  may still open the app). An upload is measured once its sender is known, and few are received at a time. The
+  browser sends them (`files.upload*` in the SDK); a mutation deletes one
   with `files.remove(id)`, an effect applied after it succeeded, like `notify`. `src/apps/wiring.ts` says what
   follows an app's events (reloads, streams, files) for the server and the tests alike.
 - `src/apphost/calls.ts` — one call of a server function, for a screen (HTTP) or an agent (MCP): gate, database
@@ -91,7 +96,8 @@ the sandbox load: `src/kit`, `src/demo`).
   apps (the runner moves the app's folder to `<APPS_DIR>/.removed/` for a month; database handles notice a
   replaced file, so an app created again under the same name starts empty).
 - `/admin/apps/<slug>/` — versions (`returnTo`: an earlier version comes back only when its migrations are
-  exactly the published ones, since migrations never go backwards) and the access list (`apps.access`, read by
+  exactly the published ones, since migrations never go backwards; a database has exactly the migrations its
+  version lists, the runner refusing files that lost one that ran) and the access list (`apps.access`, read by
   `canAccess` alone).
 - `src/control/connections.ts` — `/connections`: a member's connected applications (OAuth grants), and "Disconnect".
 - `src/demo/` — the demo app, as the folder of sources an agent would send (`app.json`, `web/main.tsx`,
@@ -171,6 +177,9 @@ the parent domain. Everything below exists because of that; none of it is option
 - Secrets (session ids, sign-on codes) are random 256-bit and stored **only as SHA-256 hashes**. Never log query
   strings (the access log in `src/app.ts` drops them).
 - The allowlist (`ALLOWED_EMAILS`) is checked at login and on every use of a session or of an MCP token.
+- **An app limited to some members is theirs alone, whatever the way in**: its screens, its files, its event
+  stream (checked again on every beat), its MCP endpoint, and the builder, where an app the connected person
+  cannot open is an app that is not there (`reachable` in `mcp/builder.ts`).
 - **Agents never change what members use.** The builder's tools only touch drafts; there is no tool that
   publishes, deletes an app or empties published data (`migrate` with `reset` only accepts `*/draft`, in the
   runner itself). Publishing is a form of the control plane, admin-only, with the exact-origin check, and it
@@ -264,8 +273,14 @@ and additions to `oauth.test.ts`, `mcp.test.ts` and `drafts.test.ts`. Brief a re
 of this file as the specification, findings written to a file as they come, a failing assertion as evidence).
 A second one the same day covered what came after (per-app MCP endpoints, removal, connections, the fixes
 themselves): 19 findings, the serious one being that an app could put a `pattern` in its input schema, which the
-web process then compiled and ran. All fixed and pinned. Not reviewed yet: versions and return, access lists,
-icons, scheduled functions.
+web process then compiled and ran. All fixed and pinned. A third round on 2026-11-13 (three reviewers working
+apart, on versions and return, access lists, icons, scheduled functions and files) found no way out of the
+sandbox or across apps; what it found is fixed and pinned: the builder ignored access lists, files could run the
+web process out of memory, icons were not counted in the version cache, a migration could leave the files after
+it ran, a busy runner cost a scheduled occurrence. Left open, on purpose or for later: one member's drafts can
+still take every runner worker and the build lane (no budget per member across apps), nothing bounds the disk
+for the whole instance, a call that was waiting when a version is published or an app removed runs with what it
+was given, and a publication interrupted between the migration and the record leaves old code on a new schema.
 
 ## Roadmap
 

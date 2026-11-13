@@ -327,8 +327,6 @@ export interface Migration {
 export interface MigrationOutcome {
   /** Names applied by this call. */
   applied: string[];
-  /** Already in the database but absent from the list (the database is ahead of this version). */
-  unknown: string[];
 }
 
 export class MigrationError extends Error {
@@ -370,7 +368,9 @@ function dropEverything(db: DatabaseSync): void {
 
 /**
  * Brings an app database up to date. New migrations apply together or not at all;
- * one that was already applied must not have changed since.
+ * one that was already applied must not have changed since, nor have left the list: the
+ * database then has exactly the migrations it was given, which is what lets two versions
+ * with the same list be told to expect the same data.
  */
 export function applyMigrations(
   connection: Connection,
@@ -384,12 +384,17 @@ export function applyMigrations(
   if (names.some((name, index) => index > 0 && name <= names[index - 1]!)) {
     throw new MigrationError(names[0] ?? '', 'migrations must have distinct names, given in ascending order');
   }
-  // Dropping a table deletes its rows first: with foreign keys on, the rows that point at it
-  // would refuse. The setting cannot change inside a transaction.
-  if (options.reset) db.exec('PRAGMA foreign_keys = OFF');
   try {
     db.exec('BEGIN IMMEDIATE');
-    if (options.reset) dropEverything(db);
+    if (options.reset) {
+      // Dropping a table deletes its rows first, and the rows that point at them would refuse:
+      // while everything is dropped, foreign keys wait for COMMIT (when nothing is left to
+      // check). The migrations then run as they do on any database, cascades included: a draft
+      // that starts again must end up with what the published data would get.
+      db.exec('PRAGMA defer_foreign_keys = ON');
+      dropEverything(db);
+      db.exec('PRAGMA defer_foreign_keys = OFF');
+    }
     db.exec(
       `CREATE TABLE IF NOT EXISTS ${PLATFORM_PREFIX}migrations (
          name TEXT PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL
@@ -403,6 +408,13 @@ export function applyMigrations(
         }[]
       ).map((row) => [row.name, row.checksum]),
     );
+    const gone = [...done.keys()].filter((name) => !names.includes(name)).sort()[0];
+    if (gone !== undefined) {
+      throw new MigrationError(
+        gone,
+        'this migration was already applied and its file is gone: a migration is never removed, put it back as it was (what it did is undone by a new migration)',
+      );
+    }
     const record = db.prepare(`INSERT INTO ${PLATFORM_PREFIX}migrations (name, checksum, applied_at) VALUES (?, ?, ?)`);
     const applied: string[] = [];
     const last = [...done.keys()].sort().at(-1);
@@ -459,19 +471,8 @@ export function applyMigrations(
         `the schema is too large: ${schema.objects} tables, indexes, views and triggers (limit ${limits.maxSchemaObjects}), ${schema.bytes} characters of definitions (limit ${limits.maxSchemaBytes})`,
       );
     }
-    if (options.reset) {
-      // The migrations ran with foreign keys off (see above): what they wrote is checked now,
-      // so that a draft accepts nothing the published database would refuse.
-      const broken = db.prepare('PRAGMA foreign_key_check').get() as { table: string } | undefined;
-      if (broken) {
-        throw new MigrationError(
-          applied.at(-1) ?? names.at(-1) ?? '',
-          `FOREIGN KEY constraint failed (a row of ${broken.table} points at a row that does not exist)`,
-        );
-      }
-    }
     db.exec('COMMIT');
-    return { applied, unknown: [...done.keys()].filter((name) => !names.includes(name)).sort() };
+    return { applied };
   } catch (error) {
     try {
       db.exec('ROLLBACK');
@@ -479,8 +480,6 @@ export function applyMigrations(
       // the transaction is already gone
     }
     throw error;
-  } finally {
-    if (options.reset) db.exec('PRAGMA foreign_keys = ON');
   }
 }
 

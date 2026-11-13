@@ -399,6 +399,48 @@ describe('the builder: an agent creates an app over MCP', () => {
     assert.deepEqual(ctx.deps.apps.files('chores', 'live'), ctx.deps.apps.files('chores', 'draft'));
   });
 
+  it('keeps an app limited to other members out of reach of a member’s agent', async () => {
+    const names = async (from: Client) =>
+      ((await tool('list_apps', {}, from)).json().apps as { app: string }[]).map((app) => app.app);
+    const listed = await connect(browserOf(BOB));
+    ctx.deps.apps.log('chores', 'live', 'log', 'list', 'what a listed member did');
+    ctx.deps.apps.setAccess('chores', [BOB]);
+    try {
+      assert.ok(!(await names(client)).includes('chores'));
+      const before = ctx.deps.apps.files('chores', 'draft');
+      // Its code, its log, its draft's data and its draft: as if the app were not there.
+      for (const [name, args] of [
+        ['read_files', { app: 'chores' }],
+        ['read_files', { app: 'chores', source: 'published' }],
+        ['read_logs', { app: 'chores', source: 'published' }],
+        ['read_logs', { app: 'chores' }],
+        ['call_function', { app: 'chores', function: 'list' }],
+        ['write_files', { app: 'chores', files: [{ path: 'web/main.tsx', content: 'export default () => null;' }] }],
+        ['write_files', { app: 'chores', reset_draft_data: true }],
+      ] as const) {
+        const refused = await tool(name, args);
+        assert.equal(refused.isError, true, name);
+        assert.match(refused.text, /There is no app named "chores"/, name);
+        assert.doesNotMatch(refused.text, /listed member/);
+      }
+      assert.deepEqual(ctx.deps.apps.files('chores', 'draft'), before);
+      // The name stays taken, without saying more.
+      const taken = await tool('create_app', { app: 'chores', name: 'Mine' });
+      assert.equal(taken.isError, true);
+      assert.doesNotMatch(taken.text, /read_files/);
+
+      // The member who is on the list works on it as before.
+      assert.ok((await names(listed)).includes('chores'));
+      assert.match((await tool('read_logs', { app: 'chores', source: 'published' }, listed)).text, /listed member/);
+      assert.equal((await tool('read_files', { app: 'chores' }, listed)).isError, false);
+    } finally {
+      ctx.deps.apps.setAccess('chores', null);
+      await listed.close();
+    }
+    assert.ok((await names(client)).includes('chores'));
+    assert.equal((await tool('read_files', { app: 'chores' })).isError, false);
+  });
+
   it('stops answering a member who left the allowlist', async () => {
     const allowed = ctx.deps.config.allowedEmails as Set<string>;
     allowed.delete(ALICE);

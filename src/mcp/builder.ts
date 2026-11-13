@@ -1,7 +1,7 @@
 import { McpServer, type CallToolResult } from '@modelcontextprotocol/server';
 import * as z from 'zod';
 import { functionCaller } from '../apphost/calls.ts';
-import { DEMO_SLUG, getApp, listApps } from '../apps/registry.ts';
+import { canAccess, DEMO_SLUG, getApp, listApps, type AppRow } from '../apps/registry.ts';
 import { isValidSlug, siteOf } from '../apps/slug.ts';
 import type { AppStatus, DeployOutcome } from '../apps/store.ts';
 import { starterFiles } from '../apps/template.ts';
@@ -59,6 +59,15 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
     },
   });
   const unknown = (slug: string) => text(`There is no app named "${slug}". Call list_apps, or create_app.`, true);
+  /**
+   * The app a tool was asked about, when the connected person may open it. An app an
+   * administrator limited to other members is, for this person's agent, not there: its code,
+   * its log and its draft's data are no more theirs to read or change than its screens.
+   */
+  const reachable = (slug: string): AppRow | undefined => {
+    const row = getApp(db, slug);
+    return row && canAccess(caller, row) ? row : undefined;
+  };
   const shipped = () =>
     text(
       'The demo app ships with the platform and is rewritten at every start: it cannot be edited. Create another app.',
@@ -102,7 +111,7 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
         problems: outcome.problems,
         next:
           outcome.stage === 'migrate'
-            ? 'The files are saved but the draft database refused a migration. If you rewrote a migration that had already run in the draft, call write_files again with reset_draft_data: true; otherwise fix the SQL.'
+            ? 'The files are saved but the draft database refused a migration. If you rewrote or removed a migration that had already run in the draft and is not published yet, call write_files again with reset_draft_data: true; otherwise fix the SQL.'
             : 'The files are saved but do not build. Fix the problems and call write_files again; the draft address still shows the last version that built.',
       });
     }
@@ -153,7 +162,8 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
     'list_apps',
     {
       title: 'List the apps',
-      description: 'Every app of the instance: its addresses, whether it is published, and where its draft stands.',
+      description:
+        'Every app of the instance you can open: its addresses, whether it is published, and where its draft stands.',
       inputSchema: z.object({}),
       annotations: { readOnlyHint: true },
     },
@@ -161,7 +171,9 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
       json({
         instance_language: config.locale,
         administration_url: adminUrl,
-        apps: listApps(db).map((row) => describe(deps.apps.status(row.slug)!)),
+        apps: listApps(db)
+          .filter((row) => canAccess(caller, row))
+          .map((row) => describe(deps.apps.status(row.slug)!)),
       }),
   );
 
@@ -192,7 +204,14 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
         return text('"demo" is the name of the app that ships with the platform. Choose another.', true);
       const card = { name, description: description ?? '' };
       const created = deps.apps.create(app, card, caller);
-      if (created === 'exists') return text(`An app named "${app}" already exists. Call read_files to see it.`, true);
+      if (created === 'exists') {
+        return text(
+          reachable(app)
+            ? `An app named "${app}" already exists. Call read_files to see it.`
+            : `The name "${app}" is taken. Choose another.`,
+          true,
+        );
+      }
       if (created !== 'created') return text('This instance already holds as many apps as it allows.', true);
       console.info(`[${app}] created by ${caller.email}`);
       return afterSave(app, await deps.apps.saveDraft(app, starterFiles(card), caller));
@@ -213,8 +232,8 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
       annotations: { readOnlyHint: true },
     },
     guarded('read_files', async ({ app, paths, source }) => {
+      if (!reachable(app)) return unknown(app);
       const files = deps.apps.files(app, source === 'published' ? 'live' : 'draft');
-      if (!getApp(db, app)) return unknown(app);
       if (!files) return text(`"${app}" has no published version yet. Read its draft instead.`, true);
       const status = describe(deps.apps.status(app)!);
       if (!paths?.length) {
@@ -266,7 +285,7 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
       }),
     },
     guarded('write_files', async ({ app, files, delete: removed, reset_draft_data }) => {
-      if (!getApp(db, app)) return unknown(app);
+      if (!reachable(app)) return unknown(app);
       if (app === DEMO_SLUG) return shipped();
       if (!files?.length && !removed?.length && !reset_draft_data) {
         return text('Nothing to do: give files to write, paths to delete, or reset_draft_data.', true);
@@ -296,7 +315,7 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
       }),
     },
     guarded('call_function', async (args, context: { mcpReq: { signal: AbortSignal } }) => {
-      const row = getApp(db, args.app);
+      const row = reachable(args.app);
       if (!row) return unknown(args.app);
       const version = deps.apps.draft(args.app);
       if (!version) return text('This app has no draft that builds yet. Call write_files first.', true);
@@ -348,7 +367,7 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
       annotations: { readOnlyHint: true },
     },
     guarded('read_logs', async ({ app, source, limit }) => {
-      if (!getApp(db, app)) return unknown(app);
+      if (!reachable(app)) return unknown(app);
       return json({ app, lines: deps.apps.logs(app, source === 'published' ? 'live' : 'draft', limit ?? 50) });
     }),
   );

@@ -48,6 +48,9 @@ const SIGNED_OUT_PATH = '/_socle/signed-out';
 const MAX_BODY = 300 * 1024;
 const FILES = '/_socle/files';
 const FILES_API = '/_socle/api/files';
+/** Files received at once: by the whole instance, and from one member on one address. */
+const MAX_RECEIVING = 6;
+const MAX_RECEIVING_EACH = 2;
 /** How often an open event stream proves it is alive, and its session still valid. */
 const STREAM_PING_MS = 25_000;
 
@@ -70,6 +73,9 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
   const functionLimiter = new RateLimiter(600, 60_000);
   const callFunction = functionCaller(deps);
   const uploadLimiter = new RateLimiter(60, 60_000);
+  /** Files being received: each is held in memory until it is written, so only a few are at a time. */
+  const receiving = new Map<string, number>();
+  let receivingNow = 0;
   const tooLarge = () =>
     t('This file is too large ({limit} MB at most).', { limit: String(FILE_LIMITS.maxBytes / 1024 / 1024) });
 
@@ -89,15 +95,15 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
   const APP_ERROR = t('The app ran into an error.');
 
   app.use('*', securityHeaders(config, APP_CSP));
-  // Small bodies everywhere, except where a member sends a file: that route has its own limit.
+  // Small bodies everywhere, except where a member sends a file: that route has its own limit,
+  // applied once the sender is known (a body without a declared length is read to be measured,
+  // and nothing that large is read for a stranger).
   const smallBody = bodyLimit({ maxSize: MAX_BODY, onError: (c) => c.text('Request too large', 413) });
   const fileBody = bodyLimit({
     maxSize: FILE_LIMITS.maxBytes,
     onError: (c) => c.json({ error: 'too_large', message: tooLarge() }, 413),
   });
-  app.use('*', (c, next) =>
-    c.req.path === FILES_API && c.req.method === 'POST' ? fileBody(c, next) : smallBody(c, next),
-  );
+  app.use('*', (c, next) => (c.req.path === FILES_API && c.req.method === 'POST' ? next() : smallBody(c, next)));
 
   // Only the platform's own service worker may be registered on an app origin: a worker
   // written by an app could answer page requests itself and drop the headers that confine it.
@@ -365,29 +371,60 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
 
   // A member adds a file to the app: the body is the file itself. What it is is read from its
   // first bytes, not from what the browser says; the answer is the id the app keeps.
-  app.post(FILES_API, async (c) => {
-    if (!uploadLimiter.take(limitKey(c))) return problem(c, 429, 'rate_limited', t('Too many requests.'));
-    const bytes = new Uint8Array(await c.req.arrayBuffer());
-    const stored = deps.files.save(c.get('site'), c.get('session')!.user.id, bytes);
-    if (!stored.ok) {
-      if (stored.reason === 'too_large') return problem(c, 413, 'too_large', tooLarge());
-      if (stored.reason === 'full') return problem(c, 507, 'full', t('This app has no room left for files.'));
-      return problem(c, 415, 'unsupported_type', t('Only pictures (JPEG, PNG, WebP, GIF) and PDF files are kept.'));
-    }
-    const { id, type, bytes: size } = stored.file;
-    return c.json({ id, type, bytes: size, url: `${FILES}/${id}` }, 201);
-  });
+  app.post(
+    FILES_API,
+    async (c, next) => {
+      const key = limitKey(c);
+      if (!uploadLimiter.take(key)) return problem(c, 429, 'rate_limited', t('Too many requests.'));
+      const mine = receiving.get(key) ?? 0;
+      if (mine >= MAX_RECEIVING_EACH || receivingNow >= MAX_RECEIVING) {
+        c.header('Retry-After', '5');
+        return problem(c, 503, 'busy', t('The app is busy. Try again in a moment.'));
+      }
+      receiving.set(key, mine + 1);
+      receivingNow += 1;
+      try {
+        return await fileBody(c, next);
+      } finally {
+        receivingNow -= 1;
+        if (mine === 0) receiving.delete(key);
+        else receiving.set(key, mine);
+      }
+    },
+    async (c) => {
+      const bytes = new Uint8Array(await c.req.arrayBuffer());
+      const stored = deps.files.save(c.get('site'), c.get('session')!.user.id, bytes);
+      if (!stored.ok) {
+        if (stored.reason === 'too_large') return problem(c, 413, 'too_large', tooLarge());
+        if (stored.reason === 'full') return problem(c, 507, 'full', t('This app has no room left for files.'));
+        return problem(c, 415, 'unsupported_type', t('Only pictures (JPEG, PNG, WebP, GIF) and PDF files are kept.'));
+      }
+      const { id, type, bytes: size } = stored.file;
+      return c.json({ id, type, bytes: size, url: `${FILES}/${id}` }, 201);
+    },
+  );
 
-  // A file of this address, for the members of the app. Its address never changes content.
+  // A file of this address, for the members of the app. Its address never changes content, so
+  // a browser keeps it; but it asks before showing it again (a 304, without the content): what
+  // a browser kept is only shown to someone who is still signed in and may still open the app.
   app.get(`${FILES}/:id`, (c) => {
-    const file = deps.files.read(c.get('site'), c.req.param('id'));
+    const site = c.get('site');
+    const file = deps.files.find(site, c.req.param('id'));
     if (!file) return c.text('Not found', 404);
-    return c.body(file.content, 200, {
+    const etag = `"${file.id}"`;
+    const headers = {
       'Content-Type': file.type,
-      'Cache-Control': 'private, max-age=31536000, immutable',
+      'Cache-Control': 'private, no-cache',
+      ETag: etag,
       // A document is saved, not opened in the app's origin; pictures are shown where the app puts them.
       ...(file.type.startsWith('image/') ? {} : { 'Content-Disposition': 'attachment' }),
-    });
+    };
+    if (c.req.header('if-none-match') === etag) return c.body(null, 304, headers);
+    // HEAD is routed here too, and its answer has no body: nothing is opened for it.
+    if (c.req.method !== 'GET') return c.body(null, 200, { ...headers, 'Content-Length': String(file.bytes) });
+    const content = deps.files.content(site, file);
+    if (!content) return c.text('Not found', 404);
+    return c.body(content, 200, { ...headers, 'Content-Length': String(file.bytes) });
   });
 
   // Ends the sign-in on this browser for the control plane and every app, and its notifications.
@@ -463,6 +500,7 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
     if (c.req.method !== 'GET') return c.body(null, 405, { Allow: 'GET' });
     const session = c.get('session')!;
     const slug = c.get('site').label;
+    const appSlug = c.get('app').slug;
     const encoder = new TextEncoder();
     let release = () => {};
     const stream = new ReadableStream<Uint8Array>({
@@ -493,9 +531,11 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
           controller.close();
           return;
         }
-        // A stream outlives the request that opened it: the session is checked again on every beat.
+        // A stream outlives the request that opened it: on every beat the session is checked
+        // again, and that the app is still this member's to open.
         const beat = setInterval(() => {
-          if (!sessionStillValid(db, session, isAllowed)) close();
+          const row = getApp(db, appSlug);
+          if (!row || !canAccess(session.user, row) || !sessionStillValid(db, session, isAllowed)) close();
           else write(': ping\n\n');
         }, deps.streamPingMs ?? STREAM_PING_MS);
         release = () => {

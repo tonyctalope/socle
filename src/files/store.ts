@@ -1,6 +1,16 @@
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  createReadStream,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import type { Site } from '../apps/slug.ts';
 import { all, get, run, type Db } from '../db/database.ts';
 
@@ -96,21 +106,30 @@ export class FileStore {
     return { ok: true, file: { id, type, bytes: bytes.byteLength, createdAt } };
   }
 
-  /** A file of this address, with its content. Null for an id of another address, or of none. */
-  read(site: Site, id: string): (StoredFile & { content: Uint8Array<ArrayBuffer> }) | null {
+  /** A file of this address. Null for an id of another address, or of none. */
+  find(site: Site, id: string): StoredFile | null {
     if (!ID.test(id)) return null;
     const row = get<{ type: string; bytes: number; created_at: string }>(
       this.db,
       'SELECT type, bytes, created_at FROM app_files WHERE id = :id AND site = :site',
       { id, site: site.label },
     );
-    if (!row) return null;
+    return row ? { id, type: row.type, bytes: row.bytes, createdAt: row.created_at } : null;
+  }
+
+  /**
+   * The content of a file `find` gave, read from the disk as the reader takes it: a file is
+   * never held whole in memory for someone who is slow to fetch it. Null when the content is
+   * gone (a restore without the files, for instance).
+   */
+  content(site: Site, file: StoredFile): ReadableStream<Uint8Array> | null {
+    let fd: number;
     try {
-      const content = new Uint8Array(readFileSync(path.join(this.dir(site), id)));
-      return { id, type: row.type, bytes: row.bytes, createdAt: row.created_at, content };
+      fd = openSync(path.join(this.dir(site), file.id), 'r');
     } catch {
-      return null; // listed, but its content is gone (a restore without the files, for instance)
+      return null;
     }
+    return Readable.toWeb(createReadStream('', { fd, autoClose: true })) as ReadableStream<Uint8Array>;
   }
 
   /** Deletes files of this address (ids of another address are ignored). */

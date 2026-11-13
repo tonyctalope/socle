@@ -11,8 +11,13 @@ import type { AppStore } from './store.ts';
 export function wireApps(apps: AppStore, live: LiveHub, files: FileStore): void {
   apps.onPublish = (slug) => live.publish(slug, 'version');
   apps.onDraft = (slug) => live.publish(siteOf(slug, true).label, 'version');
-  // A draft whose data starts again has no use for the files its old data named.
-  apps.onDraftReset = (slug) => files.clear(siteOf(slug, true));
+  // A draft whose data starts again has no use for the files its old data named, and its open
+  // pages show rows that are gone: they read again, whether or not the build changed.
+  apps.onDraftReset = (slug) => {
+    const draft = siteOf(slug, true);
+    files.clear(draft);
+    live.publish(draft.label, 'change', { client: '' });
+  };
   apps.onRemove = (slug) => {
     const sites = [siteOf(slug, false), siteOf(slug, true)];
     for (const site of sites) {

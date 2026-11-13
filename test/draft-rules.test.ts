@@ -289,7 +289,6 @@ describe('operations on a draft, when they overlap or fail', () => {
     assert.deepEqual(await ctx.deps.runner.migrate('tasks/draft', migrations('001_init.sql')), {
       ok: true,
       applied: [],
-      unknown: [],
     });
     // The same migration name can be used again, with other SQL.
     const other = tasks('two', { 'migrations/002_done.sql': 'ALTER TABLE tasks ADD COLUMN note TEXT;' });
@@ -312,7 +311,6 @@ describe('operations on a draft, when they overlap or fail', () => {
     assert.deepEqual(await ctx.deps.runner.migrate('tasks/live', migrations('001_init.sql', '002_done.sql')), {
       ok: true,
       applied: [],
-      unknown: [],
     });
   });
 
@@ -328,8 +326,18 @@ describe('operations on a draft, when they overlap or fail', () => {
         export const add = mutation(({ db }) => db.run('INSERT INTO sqlitexcache DEFAULT VALUES').changes);`,
     });
     assert.ok((await apps().saveDraft('gamma', gamma(''), { id: bobId })).ok);
+    // A page of the draft that is open learns its data went, although the build is the same one.
+    const heard: string[] = [];
+    const stop = ctx.deps.live.subscribe(
+      'gamma--draft',
+      bobId,
+      (event) => heard.push(event),
+      () => {},
+    )!;
     const again = await apps().saveDraft('gamma', gamma(''), { id: bobId }, { resetData: true });
-    assert.ok(again.ok, JSON.stringify(again));
+    stop();
+    assert.ok(again.ok && again.unchanged, JSON.stringify(again));
+    assert.deepEqual(heard, ['change']);
     // A reset whose migrations then fail leaves the database as it was, data included.
     const bob = new Browser(ctx.app);
     signIn(ctx, bob, BOB);
@@ -369,6 +377,36 @@ describe('operations on a draft, when they overlap or fail', () => {
       { name: '001_init.sql', sql: orphan['migrations/001_init.sql'] },
     ]);
     assert.equal(direct.ok, false);
+
+    // And refuses nothing it would accept: what a migration deletes takes with it the rows
+    // that say so (ON DELETE CASCADE), on a database that starts again as on any other.
+    const cascade = (extra: string) => ({
+      ...strict(''),
+      'migrations/001_init.sql': `CREATE TABLE lists (id INTEGER PRIMARY KEY);
+        CREATE TABLE items (id INTEGER PRIMARY KEY, list INTEGER NOT NULL REFERENCES lists(id) ON DELETE CASCADE);
+        INSERT INTO lists (id) VALUES (1), (2); INSERT INTO items (list) VALUES (1), (2), (2); ${extra}`,
+      'migrations/002_fewer.sql': 'DELETE FROM lists WHERE id = 2;',
+      'server/index.ts': `import { query } from '@socle/server';
+        export const items = query(({ db }) => db.get('SELECT COUNT(*) AS n FROM items').n);`,
+    });
+    const published = await ctx.deps.runner.migrate(
+      'strict/elsewhere',
+      Object.entries(cascade(''))
+        .filter(([name]) => name.startsWith('migrations/'))
+        .map(([name, sql]) => ({ name: name.slice('migrations/'.length), sql })),
+    );
+    assert.ok(published.ok, JSON.stringify(published));
+    // Rows that point at one another, in tables dropped in whatever order, do not stop the reset.
+    for (const files of [cascade(''), cascade('-- again')]) {
+      const rebuilt = await apps().saveDraft('strict', files, { id: bobId }, { resetData: true });
+      assert.ok(rebuilt.ok, JSON.stringify(rebuilt));
+    }
+    const bob = new Browser(ctx.app);
+    signIn(ctx, bob, BOB);
+    const origin = 'https://strict--draft.apps.test';
+    await bob.navigate(`${origin}/`);
+    const items = await bob.fetch(`${origin}/_socle/api/fn/items`, { method: 'POST', json: {} });
+    assert.equal(((await items.json()) as { value: number }).value, 1);
   });
 
   it('keeps each app’s log lines whatever the other apps, or its own draft, log', () => {

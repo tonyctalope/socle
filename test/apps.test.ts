@@ -405,6 +405,19 @@ describe('an app, from its sources to the browser', () => {
     assert.equal(ctx.deps.live.count('groceries'), 0);
     assert.equal((await events(new Browser(ctx.app))).response.status, 401);
     assert.equal((await bob.fetch(`${GROCERIES}/_socle/api/events`, { pageOrigin: DEMO })).status, 403);
+
+    // Nor does a page that is open keep hearing of an app its member may no longer open.
+    signIn(ctx, visitor, ALICE);
+    await visitor.navigate(`${GROCERIES}/`);
+    const open = await events(visitor);
+    await open.next(/retry/);
+    ctx.deps.apps.setAccess('groceries', [BOB]);
+    try {
+      assert.equal(await open.next(/closed/), 'closed');
+      assert.equal(ctx.deps.live.count('groceries'), 0);
+    } finally {
+      ctx.deps.apps.setAccess('groceries', null);
+    }
   });
 
   it('only replaces the published version when a new one builds and migrates', async () => {

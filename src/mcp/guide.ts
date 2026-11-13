@@ -17,9 +17,9 @@ The platform provides sign-in, the HTML page, the database, notifications and th
   Other files go in \`web/\` (\`.tsx\`, \`.ts\`, \`.css\`, \`.svg\`…). Optional \`web/style.css\` for Tailwind \`@theme\` additions.
 - \`server/index.ts\`: the server functions (see below). Other files go in \`server/\`.
 - \`migrations/NNN_name.sql\`: the database schema. Each file runs once, in name order (001_init.sql, 002_….sql).
-  Never edit a migration that was already applied: add a new one. (In a draft you may rewrite one and pass
-  \`reset_draft_data: true\` to \`write_files\`; the published data cannot be reset, so only do this before the
-  first publication.)
+  Never edit or delete a migration that was already applied: add a new one (the save is refused otherwise).
+  In a draft you may rewrite or remove one that is not published yet and pass \`reset_draft_data: true\` to
+  \`write_files\`; the published data cannot be reset, so a published migration stays as it is for good.
 - \`shared/\`: code both sides import (types, constants).
 
 Limits: 300 files, 512 KiB per file, 3 MiB in total, lines of 5000 characters at most.

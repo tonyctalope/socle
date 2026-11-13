@@ -107,8 +107,15 @@ const MAX_LOG_LENGTH = 2000;
 /** The colors of an app that names none (the platform's own background). */
 export const DEFAULT_COLOR = '#f4f1ea';
 
-/** Memory the cache of built versions may hold (their screens and stylesheets). */
+/** Memory the cache of built versions may hold (their screens, stylesheets and icons). */
 const CACHE_BYTES = 48 * 1024 * 1024;
+
+/** What a version takes in the cache: everything of it that is kept as bytes. */
+function heldBytes(version: AppVersion): number {
+  let bytes = version.js.length + version.css.length;
+  for (const png of version.icons?.values() ?? []) bytes += png.length;
+  return bytes;
+}
 
 export class AppStore {
   private readonly db: Db;
@@ -130,9 +137,17 @@ export class AppStore {
   /** Saves asked by agents that are running or waiting, per app. */
   private readonly pending = new Map<string, number>();
 
-  constructor(db: Db, runner: Runner) {
+  private readonly cacheBytes: number;
+
+  constructor(db: Db, runner: Runner, options: { cacheBytes?: number } = {}) {
     this.db = db;
     this.runner = runner;
+    this.cacheBytes = options.cacheBytes ?? CACHE_BYTES;
+  }
+
+  /** What the cache of built versions holds right now. */
+  cached(): { versions: number; bytes: number } {
+    return { versions: this.cache.size, bytes: this.cachedBytes };
   }
 
   /** A version by id. Its files are only read from the database when they are not in memory. */
@@ -166,11 +181,11 @@ export class AppStore {
         : null,
     };
     this.cache.set(id, version);
-    this.cachedBytes += version.js.length + version.css.length;
+    this.cachedBytes += heldBytes(version);
     for (const [other, old] of this.cache) {
-      if (this.cachedBytes <= CACHE_BYTES || other === id) break;
+      if (this.cachedBytes <= this.cacheBytes || other === id) break;
       this.cache.delete(other);
-      this.cachedBytes -= old.js.length + old.css.length;
+      this.cachedBytes -= heldBytes(old);
     }
     return version;
   }
@@ -337,7 +352,7 @@ export class AppStore {
     const cached = this.cache.get(id);
     if (!cached) return;
     this.cache.delete(id);
-    this.cachedBytes -= cached.js.length + cached.css.length;
+    this.cachedBytes -= heldBytes(cached);
   }
 
   /** Runs one piece of work per app at a time: a second build waits for the first. */

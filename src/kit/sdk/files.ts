@@ -19,17 +19,36 @@ export interface UploadedFile {
   bytes: number;
 }
 
-async function send(body: Blob): Promise<UploadedFile> {
+// A page sends its files one after the other: the platform receives few at a time, and a
+// phone's connection is no faster for being shared.
+let turn: Promise<unknown> = Promise.resolve();
+function inTurn<T>(work: () => Promise<T>): Promise<T> {
+  const mine = turn.then(work, work);
+  turn = mine.catch(() => {});
+  return mine;
+}
+
+/** How often, and how far apart, a file is offered again to a platform that is receiving others. */
+const BUSY_TRIES = 6;
+const BUSY_WAIT_MS = 2000;
+
+const send = (body: Blob): Promise<UploadedFile> => inTurn(() => sendNow(body));
+
+async function sendNow(body: Blob): Promise<UploadedFile> {
   let response: Response;
-  try {
-    response = await fetch('/_socle/api/files', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { Accept: 'application/json', 'Content-Type': 'application/octet-stream' },
-      body,
-    });
-  } catch {
-    throw new ApiError(TEXT.offline, 0, 'offline');
+  for (let attempt = 1; ; attempt++) {
+    try {
+      response = await fetch('/_socle/api/files', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/octet-stream' },
+        body,
+      });
+    } catch {
+      throw new ApiError(TEXT.offline, 0, 'offline');
+    }
+    if (response.status !== 503 || attempt >= BUSY_TRIES) break;
+    await new Promise((resolve) => setTimeout(resolve, BUSY_WAIT_MS));
   }
   if (response.status === 401) return toLogin();
   const data = (await response.json().catch(() => null)) as
