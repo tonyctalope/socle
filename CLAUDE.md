@@ -1,11 +1,18 @@
 # CLAUDE.md
 
-Socle is the single platform behind the household's mini-apps: it owns sign-in, sessions, notifications and the
-PWA plumbing once, so that an app is only its own screens and logic. One server answers on two kinds of hosts: the
-**control plane** (`CONTROL_URL`) and **one host per app** (`https://<slug>.<APPS_DOMAIN>`).
+Socle is the single platform behind the household's mini-apps: it owns sign-in, sessions, notifications, the PWA
+plumbing, the build and the database once, so that an app is only its own screens and logic. Apps are **written by
+agents** and arrive as a map of source files: treat their code as hostile.
+
+Two processes, one image:
+
+- **web** (`src/main.ts`) answers on the **control plane** (`CONTROL_URL`) and on **one host per app**
+  (`https://<slug>.<APPS_DOMAIN>`). It holds every secret and never executes app code.
+- **runner** (`src/runner/main.ts`) builds apps and runs their server functions. In production it is a second
+  container with no network and no secret, reached over a Unix socket.
 
 The goal that shapes every decision: **one dependency tree to keep patched**. Apps never bring npm packages of
-their own, server or browser side. Keep the platform's own tree small (4 production dependencies today).
+their own, server or browser side. Keep the platform's own tree small (10 production dependencies today).
 
 ## Commands
 
@@ -21,7 +28,11 @@ Use Node 26 (`engines`). On Tony's machine `/usr/bin/node` is v22: prefix
 `PATH=$HOME/.local/share/mise/installs/node/26.13.0/bin:$PATH`. Docker needs sudo there, so images are built by CI.
 
 Local run: `CONTROL_URL=http://socle.localhost:8787 APPS_DOMAIN=apps.localhost NODE_ENV=development DEV_LOGIN=1
-DEMO_APP=1`, then open `http://demo.apps.localhost:8787/` (browsers resolve `*.localhost` themselves).
+DEMO_APP=1`, then open `http://demo.apps.localhost:8787/` (browsers resolve `*.localhost` themselves). Without
+`RUNNER_SOCKET` (development only) the server starts the runner's worker processes itself.
+
+`npm run typecheck` runs two projects: `tsconfig.json` (server, tests) and `tsconfig.kit.json` (what browsers and
+the sandbox load: `src/kit`, `src/demo`).
 
 ## Architecture
 
@@ -38,10 +49,45 @@ DEMO_APP=1`, then open `http://demo.apps.localhost:8787/` (browsers resolve `*.l
   slug, `family` = one sign-in on one browser), `sso.ts` (one-time codes from the control plane to an app host; the
   flow is described at the top of the file), `google.ts` (OIDC with openid-client).
 - `src/push/` — Web Push, one subscription per browser **and per app** (each app is its own origin).
-- `src/client/` — what browsers load from `/_socle/`: `sdk.js` (the API apps import) and `sw.js` (notifications).
-  Plain JavaScript, served as-is. `src/demo/` is the built-in demo app (`DEMO_APP=1`).
+- `src/client/sw.js` — the service worker (notifications), served as-is at `/_socle/sw.js`.
+- `src/kit/` — what apps import in the browser: `sdk/` (`@socle/sdk`: `api`, `useQuery`, `useMe`, `usePush`,
+  `start`) and `ui/` (`@socle/ui` components, `theme.css` tokens, `base.css`). `server.d.ts` describes
+  `@socle/server`. The runner builds all of it once (`build/vendor.ts`) into ES modules served at
+  `/_socle/vendor/*`, together with React: an app's bundle imports them by URL, so a page holds one React and a
+  platform update reaches every app without rebuilding any.
+- `src/apps/store.ts` — versions of an app (sources + what the runner built) in the platform database;
+  `deploy()` = build, migrate the app's database, then point `apps.live_version` at the new version.
+- `src/demo/` — the demo app, as the folder of sources an agent would send (`app.json`, `web/main.tsx`,
+  `server/index.ts`, `migrations/*.sql`). It goes through the same build and sandbox as any app.
+- `src/runner/` — see below.
 - `src/db/` — `node:sqlite`, append-only `MIGRATIONS` (PRAGMA user_version), tiny `get/all/run` helpers with named
   params. `transaction()` callbacks must be synchronous.
+
+## An app
+
+A map of path → text (`src/runner/build/files.ts` checks its shape):
+
+- `app.json` — name, description, colors.
+- `web/main.tsx` — default-exports the root React component; the platform mounts it and writes the HTML document.
+  May import `react`, `react-dom`, `@socle/sdk`, `@socle/ui`, and its own files in `web/` and `shared/`. Styling is
+  Tailwind classes (+ optional `web/style.css`).
+- `server/index.ts` — exports `query(...)` and `mutation(...)` from `@socle/server`; imports only `server/` and
+  `shared/`. A function gets `{ db, user, members, now, today, notify }` and its input (checked against `v.…`).
+- `migrations/NNN_name.sql` — applied once each, in name order, all new ones in one transaction.
+
+Browser side, `useQuery('name', input)` reads a query and refetches it whenever any mutation of the app succeeds
+(one event stream per open page: `src/apphost/live.ts`); `api.name(input)` calls any function.
+
+## The runner (`src/runner/`)
+
+- `build/` — esbuild fed from the in-memory map by a plugin that answers **every** import (`bundle.ts`), Tailwind's
+  pure-JS `compile()` with `@plugin`/`@config` refused (`css.ts`). Nothing is installed, nothing is written.
+- `sandbox/engine.ts` — QuickJS compiled to WebAssembly; **a fresh WebAssembly instance per call**.
+  `sandbox/guest/std.ts` is `@socle/server`, bundled at start and loaded into each instance before the app.
+- `sandbox/appdb.ts` — one SQLite file per app (`<APPS_DIR>/<slug>/live.db`), an authorizer, engine limits, and
+  two handles: queries run on a read-only one. `sandbox/call.ts` — one transaction per call.
+- `pool.ts` / `worker.ts` — worker processes, one job at a time each, **killed when a job outlives its deadline**.
+- `supervisor.ts` / `client.ts` — the same jobs over a Unix socket (production) or in-process (development, tests).
 
 ## Invariants (security)
 
@@ -81,23 +127,51 @@ the parent domain. Everything below exists because of that; none of it is option
   bound.
 - Redirect targets go through `safeNextPath`, which resolves the path like a browser before checking it.
 
+### What an app's code can reach
+
+- **Server code only sees `db` and what the call was given.** It runs in an interpreter with no file, network or
+  process API; the single bridge function passes text. The platform keeps its own references to its entry points
+  inside the sandbox, taken before the app's code loads (in QuickJS a read-only global can still be redefined).
+- **SQL is checked when it is compiled** (`decide()` in `appdb.ts`, an allowlist): own tables only, no PRAGMA,
+  ATTACH, transaction statement, temporary object or extension; schema changes only in migrations. ATTACH is also
+  disabled at the engine level (`limits.attach = 0`). The authorizer does not see VACUUM: what stops it is that a
+  call is always inside the platform's transaction, which the app cannot end.
+- **A query cannot write** because its connection is read-only, not because of what it declared.
+- **Time limits are enforced by killing the worker process.** The interpreter's own interrupt only fires between
+  instructions (a slow built-in or a SQL statement is not interruptible) and is a courtesy, not the guarantee.
+  An unfinished transaction is rolled back by SQLite when the file is next opened.
+- **Nothing survives a call**: new WebAssembly instance, new interpreter, no shared state between apps or calls.
+- The web process never opens an app database and never evaluates app code; the runner never sees the platform
+  database, a session or a secret (it has no `env_file`, no network, and its workers get an empty environment).
+- App screens are confined by step 1's rules (CSP on every response, host-only cookies). The function endpoint is
+  a cookie-authenticated POST: exact `Origin` check like every other write, and `{ query: true }` from
+  `useQuery` refuses to run a mutation.
+- The page shell embeds per-member data as a JSON block (`type="application/json"`, escaped by `embeddedJson`):
+  it is `no-store`, and it is the only inline `<script>` — never add an executable one (the CSP forbids it anyway).
+- What a function returns to the browser on failure: its own `fail()` message, or a generic sentence. Details go
+  to the log, not to the page (except with `DEV_LOGIN`).
+
 Known limits, accepted with the shared domain: a hostile app can sign the member out everywhere (its own logout
 call, or by flooding the parent domain with cookies until requests are refused), can abort a sign-on in progress,
 and anyone can learn which app names exist (public manifest).
 
 ## Tests
 
-`test/helpers.ts` builds an in-memory platform with two apps (`demo`, `notes`) and a `Browser` with one cookie jar
-per host that follows redirects from host to host. `sso.test.ts` and `isolation.test.ts` pin the invariants above;
-`google-login.test.ts` runs a fake OIDC provider signing RS256 ID tokens. A security rule without a test is not
-done. An independent review on 2026-11-12 found the CSP missing on non-HTML responses; its findings are fixed and
-pinned by tests.
+`test/helpers.ts` builds an in-memory platform with two apps (`demo`, published from fake build output, and `notes`,
+unpublished) and a `Browser` with one cookie jar per host that follows redirects from host to host. `sso.test.ts`
+and `isolation.test.ts` pin the step 1 invariants; `google-login.test.ts` runs a fake OIDC provider.
+
+`sandbox.test.ts` is the list of things an app's server code must not be able to do (other apps' data, files,
+endless loops, memory, recursion, forged answers); `runner.test.ts` covers the worker processes and the kills;
+`apps.test.ts` goes from sources to HTTP with a real runner. A security rule without a test is not done.
+Independent reviews on 2026-11-12 (step 1) and 2026-11-13 (step 2): their findings are fixed and pinned by tests.
 
 ## Roadmap
 
-1. **Done here**: kernel, sign-on per subdomain, PWA and notifications on the demo app.
-2. Runner: a second container without network or secrets that builds apps (esbuild + Tailwind, in memory, no
-   `npm install`) and runs their server functions in QuickJS, one SQLite file per app, one transaction per call.
-3. MCP: one builder server on the control plane and one MCP server per app that marks functions as tools; drafts
-   that Tony publishes, versions, rollback.
-4. Port tasker, then tricount. 5. Port plantes.
+1. Done: kernel, sign-on per subdomain, PWA and notifications.
+2. **Done here**: the runner (build without install, server functions in a sandbox, one database per app,
+   migrations, live updates), the SDK and UI kit, the demo app on that pipeline.
+3. MCP: one builder server on the control plane and one MCP server per app that offers the functions marked
+   `tool` (their input schemas already come out of the build); drafts with their own database that Tony
+   publishes, versions, rollback; an app log the agent can read; per-app icons and access lists.
+4. Port tasker, then tricount (needs scheduled functions: `user` is null for those). 5. Port plantes (photos).

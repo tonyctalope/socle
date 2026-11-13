@@ -15,7 +15,7 @@ data=$(mktemp -d)
 mkdir -p "$data/apps" "$data/run"
 chmod -R 777 "$data" # the image's user is not the one running this script
 cleanup() {
-  docker rm -f "$web" "$runner" >/dev/null 2>&1 || true
+  docker rm -f -v "$web" "$runner" >/dev/null 2>&1 || true
   docker run --rm -v "$data:/data" --entrypoint sh "$image" -c 'rm -rf /data/* 2>/dev/null' >/dev/null 2>&1 || true
   rm -rf "$data" 2>/dev/null || true
 }
@@ -49,7 +49,7 @@ expect "unknown app" 404 "$(status "${resolve[@]/demo/ghost}" "http://ghost.apps
 # What the runner container is: no network, no secret, no platform database.
 expect "the runner has no network interface but loopback" lo "$(docker exec "$runner" ls /sys/class/net | tr '\n' ' ' | xargs)"
 expect "the runner knows no secret" 0 "$(docker exec "$runner" env | grep -ciE 'google|vapid|allowed|secret' || true)"
-expect "the runner does not see the platform database" 0 "$(docker exec "$runner" sh -c 'ls /data /apps/../socle.db 2>/dev/null | wc -l')"
+expect "the runner does not see the platform database" 0 "$(docker exec "$runner" sh -c "find / -xdev -name 'socle.db*' 2>/dev/null | wc -l")"
 expect "the demo app has its own database" 1 "$(docker exec "$runner" sh -c 'ls /apps/demo/live.db | wc -l')"
 docker logs "$web" 2>&1 | tail -5
 docker logs "$runner" 2>&1 | tail -3

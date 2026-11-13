@@ -109,14 +109,17 @@ describe('the runner, as the web process uses it', () => {
   it('one stuck app does not block the others', async () => {
     const stuck = await deploy(runner, 'stuck');
     const fine = await deploy(runner, 'fine');
-    const blocked = stuck.call('endlessSql');
-    const started = Date.now();
+    let stopped = false;
+    const blocked = stuck.call('endlessSql').then((result) => {
+      stopped = true;
+      return result;
+    });
     const answers = await Promise.all(
-      Array.from({ length: 20 }, (_, index) => fine.call('add', { body: `note ${index}` })),
+      Array.from({ length: 5 }, (_, index) => fine.call('add', { body: `note ${index}` })),
     );
     assert.ok(answers.every((answer) => answer.ok));
-    assert.ok(Date.now() - started < LIMITS.callMs, 'the other worker kept serving');
-    assert.equal(((await fine.call('count')) as { value: unknown }).value, 20);
+    assert.equal(stopped, false, 'the other worker served them while the first was still stuck');
+    assert.equal(((await fine.call('count')) as { value: unknown }).value, 5);
     assert.equal((await blocked).ok, false);
   });
 });
