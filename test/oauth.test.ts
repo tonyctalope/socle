@@ -9,7 +9,7 @@ import { CONTROL_COOKIE, CONTROL_SCOPE, resolveSession, SESSION_TTL_MS } from '.
 import { get, run } from '../src/db/database.ts';
 import { safeNextPath } from '../src/lib/http.ts';
 import { CONTROL_CSP, securityHeaders } from '../src/lib/security.ts';
-import { purgeClients } from '../src/oauth/clients.ts';
+import { purgeClients, redirectMatches } from '../src/oauth/clients.ts';
 import { loadOAuthConfig, type OAuthDeps } from '../src/oauth/config.ts';
 import {
   authorizationServerMetadata,
@@ -995,5 +995,81 @@ describe('OAuth authorization server for MCP clients', () => {
     run(p.deps.db, 'DELETE FROM users WHERE email = :email', { email: ALICE });
     assert.equal(count(p, 'oauth_grants'), 0);
     assert.equal(verifyAccessToken(p.deps.db, again.tokens.access_token!, p.isAllowed), null);
+  });
+
+  it('uses a client document its host cannot serve for an hour at most, and not at all once it is withdrawn', async (t) => {
+    const docUrl = 'https://claude.ai/oauth/mcp-client.json';
+    let answer: 'ok' | 'down' | 'gone' = 'ok';
+    const p = start(t, {
+      fetch: async () => {
+        if (answer === 'down') return new Response('unavailable', { status: 503 });
+        if (answer === 'gone') return new Response('gone', { status: 410 });
+        return Response.json(
+          { client_id: docUrl, client_name: 'Claude', redirect_uris: [CALLBACK], token_endpoint_auth_method: 'none' },
+          { headers: { 'cache-control': 'max-age=300' } },
+        );
+      },
+    });
+    const browser = browserOf(p, BOB);
+    const params = {
+      response_type: 'code',
+      client_id: docUrl,
+      redirect_uri: CALLBACK,
+      code_challenge: pkce().challenge,
+      code_challenge_method: 'S256',
+      resource: BUILDER,
+    };
+    const accepted = async (from: number) => {
+      const response = await begin(browser, params, { 'x-forwarded-for': `203.0.113.${from}` });
+      return response.status === 302 && /request=/.test(response.headers.get('location') ?? '');
+    };
+    assert.equal(await accepted(1), true);
+    const realNow = Date.now;
+    let offset = 0;
+    Date.now = () => realNow() + offset;
+    try {
+      // Its host is down: the last document read is used, but not for ever.
+      answer = 'down';
+      offset += 11 * 60 * 1000;
+      assert.equal(await accepted(2), true);
+      offset += 40 * 60 * 1000;
+      assert.equal(await accepted(3), true);
+      offset += 30 * 60 * 1000; // more than an hour after the last successful read
+      assert.equal(await accepted(4), false);
+      // Back, then withdrawn: a document that is gone is an answer, not an outage.
+      answer = 'ok';
+      offset += 11 * 60 * 1000;
+      assert.equal(await accepted(5), true);
+      answer = 'gone';
+      offset += 11 * 60 * 1000;
+      assert.equal(await accepted(6), false);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it('only reads registrations sent as JSON, and none from a page of another site', async (t) => {
+    const p = start(t);
+    const body = JSON.stringify({ redirect_uris: ['http://127.0.0.1/cb'], client_name: 'x' });
+    const post = (headers: Record<string, string>) =>
+      p.app.request(`${CONTROL}/oauth/register`, { method: 'POST', headers, body });
+    // What a page can post without asking the server first.
+    assert.equal((await post({ 'content-type': 'text/plain' })).status, 400);
+    assert.equal(
+      (await post({ 'content-type': 'application/json', origin: DEMO, 'sec-fetch-site': 'same-site' })).status,
+      403,
+    );
+    assert.equal((await post({ 'content-type': 'application/json', 'sec-fetch-site': 'cross-site' })).status, 403);
+    assert.equal(count(p, 'oauth_clients'), 0);
+    assert.equal((await post({ 'content-type': 'application/json' })).status, 201); // an MCP client, not a page
+  });
+
+  it('matches a loopback redirect on everything but its port', () => {
+    const registeredUri = 'http://127.0.0.1:1/cb';
+    assert.equal(redirectMatches(registeredUri, 'http://127.0.0.1:777/cb'), true);
+    assert.equal(redirectMatches(registeredUri, 'http://user:pw@127.0.0.1:777/cb'), false);
+    assert.equal(redirectMatches(registeredUri, 'http://127.0.0.1:777/other'), false);
+    assert.equal(redirectMatches(registeredUri, 'http://127.0.0.1:777/cb#x'), false);
+    assert.equal(redirectMatches(registeredUri, 'http://localhost:777/cb'), false);
   });
 });

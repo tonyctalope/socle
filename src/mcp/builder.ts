@@ -80,12 +80,19 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
   const afterSave = (slug: string, outcome: DeployOutcome): CallToolResult => {
     const status = deps.apps.status(slug)!;
     if (!outcome.ok && outcome.stage === 'refused') {
-      return json({
-        saved: false,
-        built: false,
-        problems: outcome.problems,
-        next: 'Nothing was saved. Fix what is listed and call write_files again.',
-      });
+      return text(
+        JSON.stringify(
+          {
+            saved: false,
+            built: false,
+            problems: outcome.problems,
+            next: 'Nothing was saved. Fix what is listed and call write_files again.',
+          },
+          null,
+          2,
+        ),
+        true,
+      );
     }
     if (!outcome.ok) {
       return json({

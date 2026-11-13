@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { isValidSlug } from '../src/apps/slug.ts';
-import { appOrigin, appSlugFromHost, ConfigError, loadConfig } from '../src/config.ts';
+import { appOrigin, appSiteFromHost, ConfigError, loadConfig } from '../src/config.ts';
 import { translatedSentences, translator } from '../src/i18n.ts';
 import { safeNextPath } from '../src/lib/http.ts';
 import { testConfig } from './helpers.ts';
@@ -35,8 +35,8 @@ describe('configuration', () => {
       OIDC_CLIENT_ID: '',
     });
     assert.equal(appOrigin(config, 'demo'), 'http://demo.apps.localhost:8787');
-    assert.equal(appSlugFromHost(config, 'demo.apps.localhost:8787'), 'demo');
-    assert.equal(appSlugFromHost(config, 'demo.apps.localhost'), null);
+    assert.equal(appSiteFromHost(config, 'demo.apps.localhost:8787')?.slug, 'demo');
+    assert.equal(appSiteFromHost(config, 'demo.apps.localhost'), null);
     assert.equal(config.secureCookies, false);
   });
 
@@ -69,8 +69,25 @@ describe('which app a host belongs to', () => {
   const config = testConfig();
 
   it('accepts exactly one valid label in front of the apps domain', () => {
-    assert.equal(appSlugFromHost(config, 'demo.apps.test'), 'demo');
-    assert.equal(appSlugFromHost(config, 'tri-count2.apps.test'), 'tri-count2');
+    assert.deepEqual(appSiteFromHost(config, 'demo.apps.test'), { slug: 'demo', draft: false, label: 'demo' });
+    assert.equal(appSiteFromHost(config, 'tri-count2.apps.test')?.slug, 'tri-count2');
+  });
+
+  it('knows an app’s second address, its draft’s', () => {
+    assert.deepEqual(appSiteFromHost(config, 'demo--draft.apps.test'), {
+      slug: 'demo',
+      draft: true,
+      label: 'demo--draft',
+    });
+    // Nothing else may follow the name: an app cannot be called so that it looks like a draft.
+    for (const host of [
+      'demo--draft--draft.apps.test',
+      'demo--drafts.apps.test',
+      '--draft.apps.test',
+      'a--draft.apps.test',
+    ]) {
+      assert.equal(appSiteFromHost(config, host), null, host);
+    }
   });
 
   it('refuses everything else', () => {
@@ -90,7 +107,7 @@ describe('which app a host belongs to', () => {
       'login.apps.test',
       `${'a'.repeat(33)}.apps.test`,
     ]) {
-      assert.equal(appSlugFromHost(config, host), null, host);
+      assert.equal(appSiteFromHost(config, host), null, host);
     }
   });
 

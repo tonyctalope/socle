@@ -8,7 +8,10 @@ import path from 'node:path';
 
 const APP = /^[a-z][a-z0-9-]{0,31}$/;
 const HASH = /^[0-9a-f]{64}$/;
-/** Versions kept per app: the published one, and a few before it for pages that are still open. */
+/**
+ * Bundles kept per app: the most recent installs, drafts included. A published bundle that
+ * drafts pushed out is not lost: the web side sends it again when a call names it.
+ */
 const KEEP = 6;
 const MAX_CACHED = 16;
 

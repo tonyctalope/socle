@@ -120,8 +120,8 @@ export class AppStore {
   onRemove: (slug: string) => void = () => {};
   /** One build or publication at a time per app: the second waits for the first. */
   private readonly working = new Map<string, Promise<unknown>>();
-  /** Saves that have not started yet, per app. */
-  private readonly waiting = new Map<string, number>();
+  /** Saves asked by agents that are running or waiting, per app. */
+  private readonly pending = new Map<string, number>();
 
   constructor(db: Db, runner: Runner) {
     this.db = db;
@@ -340,17 +340,17 @@ export class AppStore {
    * is refused at once. A save holds a whole app's files in memory; they are not left to pile up.
    */
   private inTurnOrRefuse(slug: string, work: () => Promise<DeployOutcome>): Promise<DeployOutcome> {
-    const waiting = this.waiting.get(slug) ?? 0;
-    if (waiting >= 1) {
+    const pending = this.pending.get(slug) ?? 0;
+    if (pending >= 2) {
       return Promise.resolve(
         refused('a build of this app is already waiting for its turn: call again when it is done'),
       );
     }
-    this.waiting.set(slug, waiting + 1);
-    return this.inTurn(slug, async () => {
-      this.waiting.set(slug, (this.waiting.get(slug) ?? 1) - 1);
-      if (this.waiting.get(slug) === 0) this.waiting.delete(slug);
-      return work();
+    this.pending.set(slug, pending + 1);
+    return this.inTurn(slug, work).finally(() => {
+      const left = (this.pending.get(slug) ?? 1) - 1;
+      if (left > 0) this.pending.set(slug, left);
+      else this.pending.delete(slug);
     });
   }
 
@@ -530,7 +530,8 @@ export class AppStore {
     return this.inTurnOrRefuse(slug, async () => {
       const current = this.files(slug, 'draft');
       if (!current) return refused(`there is no app named "${slug}"`);
-      const next = { ...current };
+      // Without a prototype: a file may be named like a property every object has.
+      const next: Record<string, string> = Object.assign(Object.create(null), current);
       for (const path of edits.remove ?? []) {
         if (!Object.hasOwn(next, path)) return refused('cannot delete a file that is not there', path);
         delete next[path];

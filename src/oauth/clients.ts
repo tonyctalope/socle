@@ -37,6 +37,10 @@ const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 const MAX_DCR_CLIENTS = 500;
 const CIMD_FAILURE_CACHE_MS = 5 * 60 * 1000;
 const CIMD_STALE_GRACE_MS = 10 * 60 * 1000;
+/** How long after its last successful read a document may still be used while its host is down. */
+const CIMD_STALE_MAX_MS = 60 * 60 * 1000;
+/** client_id → when its document was last read successfully (by this process). */
+const lastGoodFetch = new Map<string, number>();
 /** client_id → time until which a failed metadata fetch is not retried. */
 const cimdFailures = new Map<string, number>();
 
@@ -104,7 +108,9 @@ export function redirectMatches(registered: string, requested: string): boolean 
     a.hostname === b.hostname &&
     a.pathname === b.pathname &&
     a.search === b.search &&
-    !b.hash
+    !b.hash &&
+    !b.username &&
+    !b.password
   );
 }
 
@@ -222,6 +228,37 @@ function cacheSeconds(header: string | null): number {
   return Math.min(Math.max(seconds, 300), 86_400);
 }
 
+/**
+ * A metadata document that could not be used, once a request for it was sent. `transient`:
+ * its host did not answer or failed (as opposed to a document that is gone or wrong).
+ */
+class DocumentFailure extends OAuthFailure {
+  readonly transient: boolean;
+  constructor(description: string, transient = false) {
+    super('invalid_client', description);
+    this.transient = transient;
+  }
+}
+
+/** The body of a response as text, read no further than `limit` bytes. Null beyond it. */
+async function readBounded(response: Response, limit: number): Promise<string | null> {
+  const reader = response.body?.getReader();
+  if (!reader) return '';
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 async function fetchClientMetadata(
   db: Db,
   settings: Settings,
@@ -252,35 +289,36 @@ async function fetchClientMetadata(
       headers: { accept: 'application/json' },
     });
   } catch {
-    throw new OAuthFailure('invalid_client', 'client metadata document could not be fetched');
+    throw new DocumentFailure('client metadata document could not be fetched', true);
   }
-  if (!response.ok) throw new OAuthFailure('invalid_client', `client metadata document returned ${response.status}`);
-  const declared = Number(response.headers.get('content-length') ?? 0);
-  if (declared > MAX_CIMD_BYTES) throw new OAuthFailure('invalid_client', 'client metadata document is too large');
-  const text = await response.text();
-  if (text.length > MAX_CIMD_BYTES) throw new OAuthFailure('invalid_client', 'client metadata document is too large');
+  if (!response.ok) {
+    // 5xx: the host is in trouble. 4xx: the document was withdrawn, which is an answer.
+    throw new DocumentFailure(`client metadata document returned ${response.status}`, response.status >= 500);
+  }
+  const text = await readBounded(response, MAX_CIMD_BYTES).catch(() => {
+    throw new DocumentFailure('client metadata document could not be fetched', true);
+  });
+  if (text === null) throw new DocumentFailure('client metadata document is too large');
   let json: unknown;
   try {
     json = JSON.parse(text);
   } catch {
-    throw new OAuthFailure('invalid_client', 'client metadata document is not JSON');
+    throw new DocumentFailure('client metadata document is not JSON');
   }
   const parsed = cimdSchema.safeParse(json);
-  if (!parsed.success) throw new OAuthFailure('invalid_client', 'client metadata document is missing required fields');
+  if (!parsed.success) throw new DocumentFailure('client metadata document is missing required fields');
   const doc = parsed.data;
-  if (doc.client_id !== clientId) throw new OAuthFailure('invalid_client', 'client_id does not match the document URL');
+  if (doc.client_id !== clientId) throw new DocumentFailure('client_id does not match the document URL');
   const method = doc.token_endpoint_auth_method ?? 'none';
   if (method !== 'none') {
-    throw new OAuthFailure(
-      'invalid_client',
-      'only token_endpoint_auth_method none is supported for metadata documents',
-    );
+    throw new DocumentFailure('only token_endpoint_auth_method none is supported for metadata documents');
   }
   // Only the configured callbacks and loopback, whatever else the document lists.
   const redirectUris = doc.redirect_uris.filter((uri) => checkRedirectUri(uri, settings.redirectUris) === null);
   if (redirectUris.length === 0) {
-    throw new OAuthFailure('invalid_client', 'none of the redirect URIs of the metadata document is allowed');
+    throw new DocumentFailure('none of the redirect URIs of the metadata document is allowed');
   }
+  lastGoodFetch.set(clientId, Date.now());
   const expiresAt = new Date(Date.now() + cacheSeconds(response.headers.get('cache-control')) * 1000).toISOString();
   const name = doc.client_name || url.hostname;
   run(
@@ -328,10 +366,16 @@ export async function findClient(
       cimdFailures.delete(clientId);
       return client;
     } catch (error) {
-      if (cimdFailures.size > 1000) cimdFailures.clear();
-      cimdFailures.set(clientId, Date.now() + CIMD_FAILURE_CACHE_MS);
-      if (cached && error instanceof OAuthFailure && /fetched|returned/.test(error.description)) {
-        // The client's host is down: keep using the last good document for a little while.
+      // Only a fetch that was attempted is remembered: an id that was refused before any
+      // request left costs nothing to refuse again, and must not push real failures out.
+      if (error instanceof DocumentFailure) {
+        if (cimdFailures.size >= 1000) cimdFailures.delete(cimdFailures.keys().next().value!);
+        cimdFailures.set(clientId, Date.now() + CIMD_FAILURE_CACHE_MS);
+      }
+      const lastGood = lastGoodFetch.get(clientId) ?? 0;
+      if (cached && error instanceof DocumentFailure && error.transient && Date.now() - lastGood < CIMD_STALE_MAX_MS) {
+        // The client's host is down: keep using the last good document, for an hour at most
+        // after it was last read (and not at all across a restart of this server).
         run(db, 'UPDATE oauth_clients SET expires_at = :expires WHERE client_id = :id', {
           expires: new Date(Date.now() + CIMD_STALE_GRACE_MS).toISOString(),
           id: clientId,

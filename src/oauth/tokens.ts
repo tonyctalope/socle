@@ -370,7 +370,7 @@ export function refreshTokens(
     if (Date.parse(row.expires_at) <= Date.now()) return fail('refresh token expired');
     if (row.rotated_at) {
       const replay = recentRotations.get(hash);
-      if (Date.now() - Date.parse(row.rotated_at) <= REFRESH_REUSE_GRACE_MS && replay && !row.revoked_at) {
+      if (Date.now() - Date.parse(row.rotated_at) <= REFRESH_REUSE_GRACE_MS && replay) {
         // Lost response or concurrent refresh: answer with the same successor.
         const expiresIn = Math.max(1, Math.round((replay.accessExpiresAt - Date.now()) / 1000));
         return { ok: true, tokens: { ...replay.tokens, expires_in: expiresIn } };
