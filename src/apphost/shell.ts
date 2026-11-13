@@ -10,6 +10,8 @@ export interface BootData {
   push: { publicKey: string };
   /** Language of the platform's own words (the kit's components follow it). */
   locale: string;
+  /** True on the draft's address: the page says so, so that nobody takes it for the app itself. */
+  draft: boolean;
 }
 
 const VENDOR = '/_socle/vendor';

@@ -105,6 +105,9 @@ export function setup(
   const live = new LiveHub();
   apps.onPublish = (slug) => live.publish(slug, 'version');
   apps.onDraft = (slug) => live.publish(siteOf(slug, true).label, 'version');
+  apps.onRemove = (slug) => {
+    for (const draft of [false, true]) live.publish(siteOf(slug, draft).label, 'version');
+  };
   publishFake(apps, 'demo', 'Demo');
   // A second app, registered but without a published version.
   run(db, `INSERT INTO apps (slug, name, created_at) VALUES ('notes', 'Notes', :now)`, {

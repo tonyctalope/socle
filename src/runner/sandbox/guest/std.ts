@@ -125,11 +125,11 @@ function invoke(name: string, contextJson: string, inputJson: string): string | 
   const definition = exported(name);
   if (!definition) throw new UnknownFunction(name);
   const input: unknown = fromJson(inputJson);
+  const given = fromJson(contextJson) as CallContext;
   if (definition.input) {
-    const problem = validate(definition.input, input);
+    const problem = validate(definition.input, input, 'input', given.locale);
     if (problem) throw new InputError(problem);
   }
-  const given = fromJson(contextJson) as CallContext;
   const effects: unknown[] = [];
   const context = Object.freeze({
     db,

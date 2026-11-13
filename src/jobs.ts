@@ -1,22 +1,35 @@
-import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import path from 'node:path';
+import { Worker } from 'node:worker_threads';
 import { listApps } from './apps/registry.ts';
 import { liveDatabase } from './apps/store.ts';
 import { purgeExpired } from './auth/sessions.ts';
 import { purgeClients } from './oauth/clients.ts';
 import { purgeOAuth } from './oauth/tokens.ts';
-import { run } from './db/database.ts';
 import type { Deps } from './types.ts';
 
 const KEEP_BACKUPS = 14;
 
-/** Consistent snapshot of the platform database, one per day. */
-export function backupDatabase(deps: Deps, date: string): string | null {
-  const dir = path.join(deps.config.dataDir, 'backups');
+/**
+ * Consistent snapshot of a database file, one per day, written by a thread of its own so
+ * that requests are answered meanwhile. Null when today's copy already exists.
+ */
+export async function backupDatabase(dataDir: string, date: string): Promise<string | null> {
+  const dir = path.join(dataDir, 'backups');
   mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `socle-${date}.db`);
   if (existsSync(file)) return null;
-  run(deps.db, 'VACUUM INTO :file', { file });
+  // Written under another name first: a copy cut short never looks like a backup.
+  const partial = `${file}.partial`;
+  rmSync(partial, { force: true });
+  await new Promise<void>((resolve, reject) => {
+    const worker = new Worker(new URL('./db/backup-worker.ts', import.meta.url), {
+      workerData: { source: path.join(dataDir, 'socle.db'), target: partial },
+    });
+    worker.once('error', reject);
+    worker.once('exit', (code) => (code === 0 ? resolve() : reject(new Error(`backup thread exited with ${code}`))));
+  });
+  renameSync(partial, file);
   const old = readdirSync(dir)
     .filter((name) => /^socle-\d{4}-\d{2}-\d{2}\.db$/.test(name))
     .sort()
@@ -64,12 +77,16 @@ export function startJobs(deps: Deps): () => void {
       purgeClients(deps.db);
       const now = deps.now().toISOString();
       const today = now.slice(0, 10);
-      // 02:30 UTC: the middle of the night in France, summer and winter.
+      // Once a day, from 02:30 UTC on.
       if (now.slice(11, 16) < '02:30') return;
       if (today !== lastBackup) {
-        const file = backupDatabase(deps, today);
-        if (file) console.info(`backup written: ${file}`);
         lastBackup = today;
+        void backupDatabase(deps.config.dataDir, today)
+          .then((file) => file && console.info(`backup written: ${file}`))
+          .catch((error: unknown) => {
+            console.error('backup failed:', (error as Error).message);
+            lastBackup = ''; // the next tick tries again
+          });
       }
       if (appBackups.day !== today) appBackups = { day: today, attempts: 0, running: false };
       if (appBackups.running || appBackups.attempts >= BACKUP_ATTEMPTS) return;

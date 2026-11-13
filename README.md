@@ -113,7 +113,9 @@ that signs in with OAuth): the member signs in with their usual account and thei
 Everything an agent writes goes to the app's **draft**, served at `https://<app>--draft.<APPS_DOMAIN>` on a
 database of its own: members can try it, and nothing changes in the app they use. There is no tool that publishes
 and none that deletes. An administrator (`ADMIN_EMAILS`) publishes a draft from `<CONTROL_URL>/admin/`, after
-seeing which files it changes; the published database then gets the draft's migrations.
+seeing which files it changes; the published database then gets the draft's migrations. The same page removes an app
+(its data is kept aside on the server for a month). Each member sees the applications they connected, and can
+disconnect them, at `<CONTROL_URL>/connections`.
 
 ## Security
 

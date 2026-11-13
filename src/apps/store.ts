@@ -5,7 +5,7 @@ import type { BuiltApp } from '../runner/build/build.ts';
 import type { BuildProblem } from '../runner/build/files.ts';
 import { RunnerUnavailable, type Runner } from '../runner/client.ts';
 import type { FunctionInfo } from '../runner/sandbox/call.ts';
-import { isValidSlug } from './slug.ts';
+import { isValidSlug, siteOf } from './slug.ts';
 
 // Apps as the web process keeps them: versions of source files and what the runner
 // built from them, in the platform database. The runner itself keeps nothing but
@@ -104,6 +104,8 @@ export class AppStore {
   onPublish: (slug: string) => void = () => {};
   /** Called after an app's draft was built again. */
   onDraft: (slug: string) => void = () => {};
+  /** Called after an app was removed: its two addresses no longer serve anything. */
+  onRemove: (slug: string) => void = () => {};
   /** One build or publication at a time per app: the second waits for the first. */
   private readonly working = new Map<string, Promise<unknown>>();
 
@@ -564,6 +566,41 @@ export class AppStore {
       changed: names((name) => Object.hasOwn(live, name) && live[name] !== draft[name], draft),
       removed: names((name) => !Object.hasOwn(draft, name), live),
     };
+  }
+
+  /**
+   * Removes an app: what members used, its draft, its versions, and every session and
+   * notification subscription of its two addresses. The runner moves its data aside first
+   * (kept a month); if that fails, nothing is removed.
+   */
+  remove(slug: string): Promise<{ ok: true } | { ok: false; message: string }> {
+    return this.inTurn(slug, async () => {
+      const versions = all<{ id: number }>(this.db, 'SELECT id FROM app_versions WHERE app = :slug', { slug });
+      if (!get(this.db, 'SELECT 1 AS found FROM apps WHERE slug = :slug', { slug })) {
+        return { ok: false, message: `there is no app named "${slug}"` };
+      }
+      let moved;
+      try {
+        moved = await this.runner.remove(slug);
+      } catch (error) {
+        if (!(error instanceof RunnerUnavailable)) throw error;
+        return { ok: false, message: "the app's data could not be set aside; nothing was removed" };
+      }
+      if (!moved.ok) return { ok: false, message: moved.message };
+      const labels = [siteOf(slug, false).label, siteOf(slug, true).label];
+      transaction(this.db, () => {
+        for (const label of labels) {
+          run(this.db, 'DELETE FROM sessions WHERE scope = :label', { label });
+          run(this.db, 'DELETE FROM sso_codes WHERE app = :label', { label });
+          run(this.db, 'DELETE FROM push_subscriptions WHERE app = :label', { label });
+        }
+        // Versions, the draft and the log go with the app (ON DELETE CASCADE).
+        run(this.db, 'DELETE FROM apps WHERE slug = :slug', { slug });
+      });
+      for (const version of versions) this.forget(version.id);
+      this.onRemove(slug);
+      return { ok: true };
+    });
   }
 
   /** Where an app stands, for the people and agents who work on it. */

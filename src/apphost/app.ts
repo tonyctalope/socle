@@ -240,6 +240,7 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
     members: appMembers(db, c.get('app'), isAllowed),
     push: { publicKey: deps.push.publicKey },
     locale: config.locale,
+    draft: c.get('site').draft,
   });
 
   app.get('/_socle/api/me', (c) => {
