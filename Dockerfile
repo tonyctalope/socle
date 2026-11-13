@@ -2,7 +2,7 @@
 
 FROM node:26-alpine AS deps
 WORKDIR /app
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json .npmrc ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 
 FROM node:26-alpine
