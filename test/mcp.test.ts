@@ -109,7 +109,7 @@ describe('the builder: an agent creates an app over MCP', () => {
     assert.equal(start.status, 302, await start.text());
     const consentUrl = new URL(start.headers.get('location')!, origin);
     const page = await (await ctx.app.request(consentUrl, { headers: { cookie, ...NAVIGATION } })).text();
-    assert.match(page, /Test agent[\s\S]*Create and change apps/);
+    assert.match(page, /Test agent[\s\S]*wants to use the app builder/);
     const request = /name="request" value="([^"]+)"/.exec(page)![1]!;
     const answer = await ctx.app.request(new URL('/oauth/authorize', origin), {
       method: 'POST',

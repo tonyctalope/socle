@@ -59,7 +59,7 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
   // a bearer token of the platform's authorization server, never by a cookie.
   const builder = builderResource(config);
   const builderCard = () => ({
-    name: t('Create and change apps'),
+    name: t('the app builder'),
     description: t('It will be able to create apps and change their drafts. It cannot publish: an administrator does.'),
   });
   const mcp = mcpEndpoint(deps, builder, (caller) => buildBuilderServer(deps, caller));
