@@ -102,6 +102,13 @@ function runStatement(connection: Connection, op: string, sql: string, paramsJso
   });
 }
 
+const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g;
+
+/** Text from an app, made safe to print on one line of a log. */
+function printable(text: string): string {
+  return text.replace(CONTROL, ' ');
+}
+
 function readEffects(raw: unknown, limits: Limits): NotifyEffect[] {
   if (!Array.isArray(raw)) return [];
   if (raw.length > limits.maxEffects) {
@@ -119,7 +126,8 @@ function readEffects(raw: unknown, limits: Limits): NotifyEffect[] {
         'notify(to, { title, body, url }): `to` is a user id, a list of ids, "others" or "all", and a title is required',
       );
     }
-    const url = typeof message.url === 'string' && message.url.startsWith('/') ? message.url.slice(0, 300) : '/';
+    // A path inside the app, nothing that a browser could read as another site.
+    const url = typeof message.url === 'string' && /^\/(?![/\\])[^\s\\]{0,300}$/.test(message.url) ? message.url : '/';
     return {
       type: 'notify' as const,
       to: ids as NotifyEffect['to'],
@@ -136,14 +144,21 @@ function readEffects(raw: unknown, limits: Limits): NotifyEffect[] {
  */
 export async function callFunction(databases: AppDatabases, request: CallRequest, limits: Limits): Promise<CallResult> {
   const logs: string[] = [];
-  const failed = (code: string, message: string): CallResult => ({ ok: false, error: { code, message }, logs });
+  const failed = (code: string, message: string): CallResult => ({
+    ok: false,
+    error: { code, message: printable(message) },
+    logs,
+  });
   if (!FUNCTION_NAME.test(request.fn)) return failed('unknown_function', 'no such server function');
+  const input = JSON.stringify(request.input ?? null);
+  if (input.length > limits.maxInputBytes) return failed('invalid_input', 'input: too large');
 
   const deadline = Date.now() + limits.callMs;
   let connection: Connection | undefined;
   const bridge: HostBridge = (op, first, second) => {
     if (op === 'log') {
-      if (logs.length < limits.maxLogs) logs.push(`${first}: ${second.slice(0, limits.maxLogLength)}`);
+      // What an app prints ends up in the platform's log: one line each, no control characters.
+      if (logs.length < limits.maxLogs) logs.push(`${first}: ${printable(second).slice(0, limits.maxLogLength)}`);
       return '';
     }
     if (op !== 'all' && op !== 'get' && op !== 'run') throw new Error('unknown operation');
@@ -182,11 +197,7 @@ export async function callFunction(databases: AppDatabases, request: CallRequest
       now: request.now,
       today: request.today,
     });
-    const answer = sandbox.call(
-      '__invoke',
-      [request.fn, context, JSON.stringify(request.input ?? null)],
-      limits.maxResultBytes,
-    );
+    const answer = sandbox.call('__invoke', [request.fn, context, input], limits.maxResultBytes);
     connection = undefined;
     let parsed: { value?: unknown; effects?: unknown };
     try {

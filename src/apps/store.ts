@@ -59,6 +59,8 @@ export class AppStore {
   private readonly cache = new Map<number, AppVersion>();
   /** Called after an app's published version changed. */
   onPublish: (slug: string) => void = () => {};
+  /** One deployment at a time per app: the second waits for the first. */
+  private readonly deploying = new Map<string, Promise<unknown>>();
 
   constructor(db: Db, runner: Runner) {
     this.db = db;
@@ -163,7 +165,22 @@ export class AppStore {
    * Builds the files, brings the app's database up to date, then publishes. The live
    * version only changes when everything succeeded.
    */
-  async deploy(
+  deploy(slug: string, files: Record<string, string>, createdBy: Pick<UserRow, 'id'> | null): Promise<DeployOutcome> {
+    const previous = this.deploying.get(slug) ?? Promise.resolve();
+    const next = previous.then(
+      () => this.deployNow(slug, files, createdBy),
+      () => this.deployNow(slug, files, createdBy),
+    );
+    this.deploying.set(slug, next);
+    void next
+      .finally(() => {
+        if (this.deploying.get(slug) === next) this.deploying.delete(slug);
+      })
+      .catch(() => {});
+    return next;
+  }
+
+  private async deployNow(
     slug: string,
     files: Record<string, string>,
     createdBy: Pick<UserRow, 'id'> | null,

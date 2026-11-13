@@ -90,14 +90,20 @@ export async function startRunner(options: RunnerOptions): Promise<RunnerService
     });
   });
 
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(options.socketPath, () => {
-      // The socket is the runner's whole attack surface: only its own user may connect.
-      chmodSync(options.socketPath, 0o600);
-      resolve();
+  // The socket is the runner's whole attack surface: only its own user may connect, from
+  // the moment it exists.
+  const umask = process.umask(0o077);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(options.socketPath, () => {
+        chmodSync(options.socketPath, 0o600);
+        resolve();
+      });
     });
-  });
+  } finally {
+    process.umask(umask);
+  }
   void pool.run({ type: 'warm' }).catch(() => {});
 
   return {

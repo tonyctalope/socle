@@ -107,20 +107,30 @@ describe('the runner, as the web process uses it', () => {
   });
 
   it('one stuck app does not block the others', async () => {
-    const stuck = await deploy(runner, 'stuck');
-    const fine = await deploy(runner, 'fine');
-    let stopped = false;
-    const blocked = stuck.call('endlessSql').then((result) => {
-      stopped = true;
-      return result;
+    // A long deadline, so that the stuck call is still stuck however slow this machine starts workers.
+    const patient = localRunner({
+      appsDir: path.join(dir, 'patient'),
+      limits: { ...LIMITS, callMs: 4_000 },
+      workers: 2,
     });
-    const answers = await Promise.all(
-      Array.from({ length: 5 }, (_, index) => fine.call('add', { body: `note ${index}` })),
-    );
-    assert.ok(answers.every((answer) => answer.ok));
-    assert.equal(stopped, false, 'the other worker served them while the first was still stuck');
-    assert.equal(((await fine.call('count')) as { value: unknown }).value, 5);
-    assert.equal((await blocked).ok, false);
+    try {
+      const stuck = await deploy(patient, 'stuck');
+      const fine = await deploy(patient, 'fine');
+      let stopped = false;
+      const blocked = stuck.call('endlessSql').then((result) => {
+        stopped = true;
+        return result;
+      });
+      const answers = await Promise.all(
+        Array.from({ length: 5 }, (_, index) => fine.call('add', { body: `note ${index}` })),
+      );
+      assert.ok(answers.every((answer) => answer.ok));
+      assert.equal(stopped, false, 'the other worker served them while the first was still stuck');
+      assert.equal(((await fine.call('count')) as { value: unknown }).value, 5);
+      assert.equal((await blocked).ok, false);
+    } finally {
+      await patient.close();
+    }
   });
 });
 

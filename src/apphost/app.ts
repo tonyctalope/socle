@@ -362,7 +362,12 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
     let release = () => {};
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
-        const write = (text: string) => controller.enqueue(encoder.encode(text));
+        const write = (text: string) => {
+          // A page that stopped reading (a phone asleep with the connection still up) is let go
+          // rather than buffered for; it reconnects and refreshes when it wakes up.
+          if ((controller.desiredSize ?? 0) < -200) close();
+          else controller.enqueue(encoder.encode(text));
+        };
         const close = () => {
           release();
           try {

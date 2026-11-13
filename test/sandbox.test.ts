@@ -100,6 +100,10 @@ describe('server functions', () => {
         return db.run('INSERT INTO notes (body, author) VALUES (?, 1)', body).changes;
       });
       export const chatty = query(() => { console.log('hello', { a: 1 }); console.warn('careful'); return 1; });
+      export const forger = query(() => {
+        console.log('first\\n[other-app] add: forged line\\u001b[2K\\r');
+        throw new Error('boom\\nGET control / 200');
+      });
       export const flags = query(({ db }) => db.get('SELECT ? AS yes, ? AS no, ? AS empty', true, false, undefined));
     `,
     );
@@ -126,6 +130,10 @@ describe('server functions', () => {
 
     const chatty = await notes.call('chatty');
     assert.deepEqual(chatty.logs, ['log: hello {"a":1}', 'warn: careful']);
+    // What an app prints or throws cannot start a new line in the platform's log.
+    const forger = await notes.call('forger');
+    assert.deepEqual(forger.logs, ['log: first [other-app] add: forged line [2K ']);
+    assert.ok(!forger.ok && /^Error: boom GET control \/ 200/.test(forger.error.message), JSON.stringify(forger));
   });
 
   it('checks the input against the declared shape before the function runs', async () => {
@@ -135,6 +143,7 @@ describe('server functions', () => {
     refused(await notes.call('add', { body: 'x'.repeat(201) }), 'invalid_input', /at most 200/);
     refused(await notes.call('add', { body: 'ok', admin: true }), 'invalid_input', /input\.admin: unknown field/);
     refused(await notes.call('add', 'Pain'), 'invalid_input', /expected an object/);
+    refused(await notes.call('add', { body: 'x'.repeat(DEFAULT_LIMITS.maxInputBytes) }), 'invalid_input', /too large/);
     assert.equal(value(await notes.call('count')), 0);
   });
 
@@ -217,6 +226,8 @@ describe('server functions', () => {
         notify('others', { title: user.name + ' a ajouté une note', body: 'Pain', url: '/notes/1' });
         notify(2, { title: 'Pour toi' });
         notify([1, 2], { title: 'Ailleurs', url: 'https://evil.example/' });
+        notify(1, { title: 'Ailleurs aussi', url: '//evil.example/x' });
+        notify(1, { title: 'Encore', url: '/\\\\evil.example' });
       });
       export const quiet = query(({ notify }) => { notify('all', { title: 'Lu' }); return 1; });
       export const flood = mutation(({ notify }) => { for (let i = 0; i < 100; i++) notify('all', { title: 'Encore' }); });
@@ -228,6 +239,8 @@ describe('server functions', () => {
       { type: 'notify', to: 'others', title: 'Tony a ajouté une note', body: 'Pain', url: '/notes/1' },
       { type: 'notify', to: [2], title: 'Pour toi', body: '', url: '/' },
       { type: 'notify', to: [1, 2], title: 'Ailleurs', body: '', url: '/' }, // only paths of the app
+      { type: 'notify', to: [1], title: 'Ailleurs aussi', body: '', url: '/' },
+      { type: 'notify', to: [1], title: 'Encore', body: '', url: '/' },
     ]);
     const quiet = await notes.call('quiet');
     assert.deepEqual(quiet.ok && quiet.effects, [], 'reading something never notifies anyone');

@@ -405,6 +405,23 @@ describe('an app, from its sources to the browser', () => {
     await stream.close();
   });
 
+  it('publishes one deployment at a time per app', async () => {
+    const version = (label: string) =>
+      courses({
+        'app.json': '{ "name": "Courses 2" }',
+        'migrations/002_done.sql': 'ALTER TABLE items ADD COLUMN done INTEGER NOT NULL DEFAULT 0;',
+        'web/main.tsx': `export default function App() { return <p>${label}</p>; }`,
+      });
+    const outcomes = await Promise.all(
+      ['a', 'b', 'c'].map((label) => ctx.deps.apps.deploy('courses', version(label), null)),
+    );
+    const ids = outcomes.map((outcome) => (outcome.ok ? outcome.versionId : 0));
+    assert.deepEqual(ids, [ids[0]!, ids[0]! + 1, ids[0]! + 2], 'in the order they were asked');
+    const live = ctx.deps.apps.live('courses')!;
+    assert.equal(live.id, ids[2]);
+    assert.match(new TextDecoder().decode(live.js), /children:"c"/);
+  });
+
   it('has the runner copy each app’s data once a day', async () => {
     assert.equal(await backupApps(ctx.deps, '2027-01-15'), 2); // courses and secrets; the fake demo has no data
     assert.equal(await backupApps(ctx.deps, '2027-01-15'), 0);
