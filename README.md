@@ -30,7 +30,7 @@ One server answers on two kinds of addresses:
 
 When someone opens an app without being signed in, the browser goes through the control plane, which sends back a
 single-use code, valid one minute, for that app only. The app trades the code for its own session cookie. Signing
-out from any app signs out of all of them on that browser.
+out from any app signs out of all of them on that browser, and stays in that app: signing in again comes back to it.
 
 On every app, the platform serves under `/_socle/`:
 

@@ -39,6 +39,7 @@ import { shellPage } from './shell.ts';
 const ICONS = '/_socle/icons';
 const SW_PATH = '/_socle/sw.js';
 const VENDOR = '/_socle/vendor';
+const SIGNED_OUT_PATH = '/_socle/signed-out';
 /** A function's input travels as JSON in the request body. */
 const MAX_BODY = 300 * 1024;
 /** How often an open event stream proves it is alive, and its session still valid. */
@@ -191,6 +192,17 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
     return c.redirect(grant.nextPath, 303);
   });
 
+  // Where signing out from an app lands: a page of the app itself. An installed app stays
+  // itself (leaving for the control plane would open a browser over it), and signing in
+  // again from here comes back to this app.
+  app.get(SIGNED_OUT_PATH, (c) => {
+    if (c.get('session')) return c.redirect('/', 302);
+    c.header('Cache-Control', 'no-store');
+    return c.html(
+      message(c.get('app').name, t('You are signed out.'), { href: '/_socle/login?next=%2F', label: t('Sign in') }),
+    );
+  });
+
   // From here on, a session of this host is required.
   app.use('*', async (c, next) => {
     if (c.get('session')) return next();
@@ -273,7 +285,7 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
   app.post('/_socle/api/logout', (c) => {
     deleteFamily(db, c.get('session')!.family);
     clearAppCookie(c, config, APP_COOKIE);
-    return c.json({ url: `${config.controlOrigin}/` });
+    return c.json({ url: SIGNED_OUT_PATH });
   });
 
   /** Sends what a mutation asked for, to members of this app only. */
