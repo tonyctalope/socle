@@ -178,20 +178,50 @@ describe('the two addresses of an app share nothing', () => {
     const gate = new CallGate();
     let running = 0;
     let most = 0;
-    const task = async () => {
+    let draftRunning = 0;
+    let draftMost = 0;
+    const task = (draft: boolean) => async () => {
       running += 1;
       most = Math.max(most, running);
+      if (draft) draftMost = Math.max(draftMost, ++draftRunning);
       await new Promise((resolve) => setTimeout(resolve, 20));
       running -= 1;
+      if (draft) draftRunning -= 1;
       return 'done' as const;
     };
-    const published = [1, 2, 3].map(() => gate.run('tasks', undefined, task));
-    const draft = [1, 2, 3].map(() => gate.run('tasks', undefined, task, 1));
+    const published = [1, 2, 3].map(() => gate.run('tasks', undefined, task(false)));
+    // A screen of the draft asks for several things at once: they run one after the other.
+    const draft = [1, 2, 3].map(() => gate.run('tasks', undefined, task(true), 1));
     const outcomes = await Promise.all([...published, ...draft]);
     assert.ok(most <= 2, `${most} calls of one app ran at once`);
-    assert.deepEqual(outcomes.slice(0, 3), ['done', 'done', 'done']);
-    // One of the draft's calls waits for a place; the others are told the app is busy.
-    assert.deepEqual(outcomes.slice(3).sort(), ['busy', 'busy', 'done']);
+    assert.equal(draftMost, 1, 'the draft held more than one place');
+    assert.deepEqual(outcomes, ['done', 'done', 'done', 'done', 'done', 'done']);
+  });
+
+  it("keeps the draft's waiting calls out of the published app's queue, bounded, and lets them leave", async () => {
+    const gate = new CallGate({ perApp: 2, waitingPerApp: 2, maxWaitMs: 60 });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const slow = async () => {
+      await held;
+      return 'done' as const;
+    };
+    const first = gate.run('tasks', undefined, slow, 1);
+    const leaving = new AbortController();
+    const second = gate.run('tasks', leaving.signal, slow, 1);
+    const third = gate.run('tasks', undefined, slow, 1);
+    // The draft's queue is full: a fourth call is told at once.
+    assert.equal(await gate.run('tasks', undefined, slow, 1), 'busy');
+    // The published app still has its second place and its own queue.
+    assert.equal(await gate.run('tasks', undefined, async () => 'live' as const), 'live');
+    leaving.abort();
+    assert.equal(await second, 'gone');
+    // Nobody finished in time: the one still waiting is refused, not run.
+    assert.equal(await third, 'busy');
+    release();
+    assert.equal(await first, 'done');
+    // Everything left: the app's places are all free again.
+    assert.equal(await gate.run('tasks', undefined, async () => 'again' as const, 1), 'again');
   });
 });
 
