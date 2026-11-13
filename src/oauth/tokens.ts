@@ -263,12 +263,17 @@ function sameResource(requested: string, granted: string): boolean {
   return normalise(requested) === normalise(granted);
 }
 
+/** Whether a member may (still) get tokens for an endpoint: the resolver of the routes, by user id. */
+export type MayUse = (resource: string, userId: number) => boolean;
+
 export function exchangeCode(
   db: Db,
   client: OAuthClient,
   params: { code: string; redirectUri?: string; codeVerifier?: string; resource?: string },
   isAllowed: (email: string) => boolean,
   ttl: TokenTtls,
+  /** Asked again here: the endpoint may be gone, or closed to this member, since the consent. */
+  mayUse: MayUse = () => true,
 ): Outcome {
   return transaction(db, (): Outcome => {
     const fail = (description: string, code = 'invalid_grant'): Outcome => ({
@@ -307,6 +312,9 @@ export function exchangeCode(
       return fail('resource does not match the authorization request', 'invalid_target');
     }
     if (!isAllowed(row.email)) return fail('this account is no longer allowed');
+    if (!mayUse(row.resource, row.user_id)) {
+      return fail('this resource is no longer available to this account', 'invalid_target');
+    }
 
     const grantId = randomToken(16);
     const now = isoNow();
@@ -341,6 +349,7 @@ interface RefreshRow {
   scope: string;
   resource: string;
   revoked_at: string | null;
+  user_id: number;
   email: string;
 }
 
@@ -350,6 +359,7 @@ export function refreshTokens(
   params: { refreshToken: string; scope?: string; resource?: string },
   isAllowed: (email: string) => boolean,
   ttl: TokenTtls,
+  mayUse: MayUse = () => true,
 ): Outcome {
   return transaction(db, (): Outcome => {
     const fail = (description: string, code = 'invalid_grant'): Outcome => ({
@@ -360,7 +370,7 @@ export function refreshTokens(
     const hash = sha256(params.refreshToken);
     const row = get<RefreshRow>(
       db,
-      `SELECT t.grant_id, t.expires_at, t.rotated_at, g.client_id, g.scope, g.resource, g.revoked_at, u.email
+      `SELECT t.grant_id, t.expires_at, t.rotated_at, g.client_id, g.scope, g.resource, g.revoked_at, g.user_id, u.email
          FROM oauth_tokens t JOIN oauth_grants g ON g.id = t.grant_id JOIN users u ON u.id = g.user_id
         WHERE t.token_hash = :hash AND t.type = 'refresh'`,
       { hash },
@@ -382,6 +392,10 @@ export function refreshTokens(
     if (!isAllowed(row.email)) {
       revokeGrantInternal(db, row.grant_id);
       return fail('this account is no longer allowed');
+    }
+    // Not revoked: the endpoint may offer tools again later; until then no token is issued for it.
+    if (!mayUse(row.resource, row.user_id)) {
+      return fail('this resource is not available to this account', 'invalid_target');
     }
     if (params.resource !== undefined && !sameResource(params.resource, row.resource)) {
       return fail('resource does not match the grant', 'invalid_target');
@@ -547,6 +561,10 @@ export function revokeResource(db: Db, resource: string): void {
       { resource },
     );
     for (const grant of grants) revokeGrantInternal(db, grant.id);
+    // What was on its way to becoming a connection ends too: codes not exchanged yet, requests
+    // waiting on a consent page.
+    run(db, 'DELETE FROM oauth_codes WHERE resource = :resource', { resource });
+    run(db, 'DELETE FROM oauth_requests WHERE resource = :resource', { resource });
   });
 }
 

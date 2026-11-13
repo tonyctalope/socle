@@ -237,7 +237,9 @@ export class AppDatabases {
       }
       this.close(database);
     }
-    mkdirSync(path.dirname(file), { recursive: true });
+    // A call never creates a database: migrations do, when a version is built or published.
+    // An app that was just removed has none, and must not get an empty one back.
+    if (!existsSync(file)) throw new SqlRefused('this app has no database');
     const write = connect(file, 'call', false, this.limits);
     let read: Connection;
     try {
@@ -385,8 +387,8 @@ export function applyMigrations(
   // Dropping a table deletes its rows first: with foreign keys on, the rows that point at it
   // would refuse. The setting cannot change inside a transaction.
   if (options.reset) db.exec('PRAGMA foreign_keys = OFF');
-  db.exec('BEGIN IMMEDIATE');
   try {
+    db.exec('BEGIN IMMEDIATE');
     if (options.reset) dropEverything(db);
     db.exec(
       `CREATE TABLE IF NOT EXISTS ${PLATFORM_PREFIX}migrations (
@@ -456,6 +458,17 @@ export function applyMigrations(
         applied.at(-1) ?? names.at(-1) ?? '',
         `the schema is too large: ${schema.objects} tables, indexes, views and triggers (limit ${limits.maxSchemaObjects}), ${schema.bytes} characters of definitions (limit ${limits.maxSchemaBytes})`,
       );
+    }
+    if (options.reset) {
+      // The migrations ran with foreign keys off (see above): what they wrote is checked now,
+      // so that a draft accepts nothing the published database would refuse.
+      const broken = db.prepare('PRAGMA foreign_key_check').get() as { table: string } | undefined;
+      if (broken) {
+        throw new MigrationError(
+          applied.at(-1) ?? names.at(-1) ?? '',
+          `FOREIGN KEY constraint failed (a row of ${broken.table} points at a row that does not exist)`,
+        );
+      }
     }
     db.exec('COMMIT');
     return { applied, unknown: [...done.keys()].filter((name) => !names.includes(name)).sort() };

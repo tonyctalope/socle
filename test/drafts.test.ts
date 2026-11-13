@@ -113,7 +113,7 @@ describe('a draft, from the first file to its publication', () => {
   });
 
   it('publishes the draft: members get it, on a database that starts empty', async () => {
-    const published = await apps().publishDraft('tasks');
+    const published = await apps().publishDraft('tasks', apps().status('tasks')!.draft.versionId);
     assert.ok(published.ok, JSON.stringify(published));
     assert.equal(published.unchanged, false);
     assert.deepEqual(published.applied, ['001_init.sql']);
@@ -131,7 +131,7 @@ describe('a draft, from the first file to its publication', () => {
     assert.equal(status.draft.differs, false);
     assert.deepEqual(apps().files('tasks', 'draft'), tasks());
     // Publishing again changes nothing.
-    assert.deepEqual(await apps().publishDraft('tasks'), {
+    assert.deepEqual(await apps().publishDraft('tasks', apps().status('tasks')!.draft.versionId), {
       ok: true,
       versionId: status.live!.versionId,
       unchanged: true,
@@ -161,7 +161,7 @@ describe('a draft, from the first file to its publication', () => {
     assert.equal(apps().status('tasks')!.draft.versionId, before.draft.versionId);
     assert.ok(apps().status('tasks')!.draft.problems!.length > 0);
     assert.equal(apps().files('tasks', 'draft')!['web/main.tsx'], 'export default function (');
-    assert.deepEqual(await apps().publishDraft('tasks'), {
+    assert.deepEqual(await apps().publishDraft('tasks', apps().status('tasks')!.draft.versionId), {
       ok: false,
       stage: 'refused',
       problems: [{ message: 'the draft does not build' }],
@@ -170,7 +170,7 @@ describe('a draft, from the first file to its publication', () => {
 
     // Fixed and published: the published data gets the new column and keeps its rows.
     assert.ok((await apps().saveDraft('tasks', next, { id: bobId })).ok);
-    const published = await apps().publishDraft('tasks');
+    const published = await apps().publishDraft('tasks', apps().status('tasks')!.draft.versionId);
     assert.ok(published.ok, JSON.stringify(published));
     assert.deepEqual(published.applied, ['002_done.sql']);
     assert.deepEqual(await value(await call(LIVE, 'list')), [{ id: 1, label: 'real work' }]);
@@ -188,7 +188,7 @@ describe('a draft, from the first file to its publication', () => {
     assert.deepEqual(again.applied, ['001_init.sql']);
     assert.deepEqual(await value(await call(DRAFT, 'list')), []);
     // Publishing it is refused by the published database, which already ran the first migration as it was.
-    const published = await apps().publishDraft('tasks');
+    const published = await apps().publishDraft('tasks', apps().status('tasks')!.draft.versionId);
     assert.equal(published.ok, false);
     assert.equal(published.ok === false && published.stage, 'migrate');
     assert.deepEqual(await value(await call(LIVE, 'list')), [{ id: 1, label: 'real work' }]);
@@ -305,13 +305,43 @@ describe('publishing is an administrator’s decision', () => {
       assert.match(await (await admin.request(`${CONTROL}/admin/?published=tasks`)).text(), /Tasks is published\./);
       assert.doesNotMatch(await (await admin.request(`${CONTROL}/admin/?published=Payroll`)).text(), /is published\./);
       assert.doesNotMatch(await (await admin.request(`${CONTROL}/admin/?removed=tasks`)).text(), /was removed/);
+      // Nor does an address make the page announce what was not just done: demo was not discarded.
+      assert.doesNotMatch(await (await admin.request(`${CONTROL}/admin/?discarded=demo`)).text(), /was discarded/);
+      assert.doesNotMatch(await (await admin.request(`${CONTROL}/admin/?removed=never-existed`)).text(), /was removed/);
       assert.equal((await post(admin, '/admin/apps/nope/publish')).status, 404);
 
       // An edit that is given up: the draft is the published version again.
       const edited = tasks({ 'shared/note.ts': 'export const note = 1;' });
       assert.ok((await ctx.deps.apps.saveDraft('tasks', edited, { id: userId })).ok);
       assert.match(await (await admin.request(`${CONTROL}/admin/`)).text(), /\+ shared\/note\.ts/);
-      assert.equal((await post(admin, '/admin/apps/tasks/discard')).status, 303);
+      // Like publishing, discarding names the draft its page showed: one saved since is kept.
+      const discard = (saved: string) =>
+        admin.request(`${CONTROL}/admin/apps/tasks/discard`, {
+          method: 'POST',
+          headers: { origin: CONTROL, 'content-type': 'application/x-www-form-urlencoded' },
+          body: `saved=${encodeURIComponent(saved)}`,
+        });
+      const shownDraft = () =>
+        admin
+          .request(`${CONTROL}/admin/`)
+          .then((response) => response.text())
+          .then((html) => /name="saved" value="([^"]+)"/.exec(html)![1]!);
+      const looked = await shownDraft();
+      const newer = tasks({
+        'shared/note.ts': 'export const note = 2;',
+        'shared/late.ts': 'export const late = true;',
+      });
+      assert.ok((await ctx.deps.apps.saveDraft('tasks', newer, { id: userId })).ok);
+      const kept = await discard(looked);
+      assert.equal(kept.status, 409);
+      assert.match(await kept.text(), /the draft changed since it was shown/);
+      assert.deepEqual(ctx.deps.apps.files('tasks', 'draft'), newer);
+      const discarded = await discard(await shownDraft());
+      assert.equal(discarded.status, 303);
+      assert.match(
+        await (await admin.request(`${CONTROL}${discarded.headers.get('location')}`)).text(),
+        /The draft of Tasks was discarded\./,
+      );
       const status = ctx.deps.apps.status('tasks')!;
       assert.equal(status.draft.differs, false);
       assert.equal(status.draft.versionId, status.live?.versionId);
@@ -342,7 +372,7 @@ describe('removing an app', () => {
       const publish = async () => {
         apps.create('tasks', { name: 'Tasks', description: '' }, { id: userId });
         assert.ok((await apps.saveDraft('tasks', tasks(), { id: userId })).ok);
-        assert.ok((await apps.publishDraft('tasks')).ok);
+        assert.ok((await apps.publishDraft('tasks', apps.status('tasks')!.draft.versionId)).ok);
       };
       const call = (browser: Browser, origin: string, name: string, input: unknown = {}) =>
         browser.fetch(`${origin}/_socle/api/fn/${name}`, { method: 'POST', json: { input } });
@@ -350,6 +380,9 @@ describe('removing an app', () => {
       await member.navigate(`${LIVE}/`);
       await member.navigate(`${DRAFT}/`);
       assert.equal((await call(member, LIVE, 'add', { label: 'kept aside' })).status, 200);
+      const stream = await member.fetch(`${LIVE}/_socle/api/events`);
+      assert.equal(stream.status, 200);
+      assert.equal(ctx.deps.live.count('tasks'), 1);
 
       // Asked twice: a page, then its button. Only an administrator, only from the control plane.
       const confirm = await admin.request(`${CONTROL}/admin/apps/tasks/remove`);
@@ -362,9 +395,16 @@ describe('removing an app', () => {
       const removed = await post(admin);
       assert.equal(removed.status, 303);
       assert.equal(removed.headers.get('location'), '/admin/?removed=tasks');
-      assert.match(await (await admin.request(`${CONTROL}/admin/?removed=tasks`)).text(), /The app was removed\./);
+      assert.match(await (await admin.request(`${CONTROL}/admin/?removed=tasks`)).text(), /Tasks was removed\./);
+      // A second click on the button, answered after the first did the work, says the same.
+      const again = await post(admin);
+      assert.equal(again.status, 303);
+      assert.equal(again.headers.get('location'), '/admin/?removed=tasks');
 
       assert.equal(apps.status('tasks'), null);
+      // Pages that were open are told to reload, then let go.
+      assert.equal(ctx.deps.live.count('tasks'), 0);
+      await stream.body?.cancel().catch(() => {});
       assert.doesNotMatch(await (await member.request(`${CONTROL}/`)).text(), /tasks\.apps\.test/);
       assert.equal((await member.navigate(`${LIVE}/`)).response.status, 404);
       assert.equal((await call(member, LIVE, 'list')).status, 404);

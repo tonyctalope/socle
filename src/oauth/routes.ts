@@ -1,6 +1,6 @@
 import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
-import type { UserRow } from '../auth/users.ts';
+import { getUser, type UserRow } from '../auth/users.ts';
 import { translator } from '../i18n.ts';
 import { clientIp, isSameOrigin, isTopLevelNavigation, RateLimiter } from '../lib/http.ts';
 import { messagePage } from '../pages/layout.ts';
@@ -120,6 +120,12 @@ export function oauthRoutes(deps: OAuthDeps, resolve: ResourceResolver): Hono<Co
   const tokenLimiter = new RateLimiter(120, 60_000);
   const authorizeLimiter = new RateLimiter(60, 60_000);
 
+  /** The resolver, for the token endpoint: a code or a refresh token only becomes tokens for an endpoint that still exists for that member. */
+  const mayUse = (resource: string, userId: number) => {
+    const user = getUser(db, userId);
+    return user !== undefined && resolve(resource, user) !== null;
+  };
+
   const errorPage = (c: Context, status: 400 | 401 | 403 | 429, title: string, message: string) =>
     c.html(messagePage(config.locale, title, message), status);
   const expired = (c: Context) =>
@@ -143,17 +149,18 @@ export function oauthRoutes(deps: OAuthDeps, resolve: ResourceResolver): Hono<Co
   app.get('/.well-known/oauth-authorization-server', (c) => c.json(authorizationServerMetadata(config)));
 
   app.post('/oauth/register', async (c) => {
-    if (!registerLimiter.take(clientIp(c))) {
-      return oauthError(c, new OAuthFailure('invalid_client_metadata', 'too many registrations, retry later', 429));
-    }
     // A page of another site can post text without asking (no preflight), in its visitor's
     // name and from their address: only JSON sent as JSON is read, and never from such a page.
+    // Checked before the limiter: what a page sends must not count against its visitor either.
     const site = c.req.header('sec-fetch-site');
     if (site !== undefined && site !== 'none' && site !== 'same-origin') {
       return oauthError(c, new OAuthFailure('invalid_client_metadata', 'registration is not open to web pages', 403));
     }
     if (!(c.req.header('content-type') ?? '').toLowerCase().startsWith('application/json')) {
       return oauthError(c, new OAuthFailure('invalid_client_metadata', 'send the metadata as application/json'));
+    }
+    if (!registerLimiter.take(clientIp(c))) {
+      return oauthError(c, new OAuthFailure('invalid_client_metadata', 'too many registrations, retry later', 429));
     }
     const body = await c.req.json().catch(() => null);
     try {
@@ -355,6 +362,7 @@ export function oauthRoutes(deps: OAuthDeps, resolve: ResourceResolver): Hono<Co
           },
           isAllowed,
           ttl,
+          mayUse,
         );
       } else if (body.grant_type === 'refresh_token') {
         if (!body.refresh_token) throw new OAuthFailure('invalid_request', 'refresh_token is required');
@@ -364,6 +372,7 @@ export function oauthRoutes(deps: OAuthDeps, resolve: ResourceResolver): Hono<Co
           { refreshToken: body.refresh_token, scope: body.scope, resource: body.resource },
           isAllowed,
           ttl,
+          mayUse,
         );
       } else {
         throw new OAuthFailure('unsupported_grant_type', 'grant_type must be authorization_code or refresh_token');

@@ -49,6 +49,12 @@ export class LiveHub {
     return this.streams.get(slug)?.size ?? 0;
   }
 
+  /** Ends every stream of one address: for an app that no longer exists. */
+  close(slug: string): void {
+    for (const stream of [...(this.streams.get(slug) ?? [])]) stream.close();
+    this.streams.delete(slug);
+  }
+
   closeAll(): void {
     for (const set of this.streams.values()) for (const stream of [...set]) stream.close();
     this.streams.clear();

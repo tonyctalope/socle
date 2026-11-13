@@ -42,7 +42,7 @@ describe('one app, in the administration', () => {
 
   const publish = async (files: Record<string, string>) => {
     assert.ok((await apps().saveDraft('tasks', files, { id: adminId })).ok);
-    const published = await apps().publishDraft('tasks');
+    const published = await apps().publishDraft('tasks', apps().status('tasks')!.draft.versionId);
     assert.ok(published.ok, JSON.stringify(published));
     return published.versionId;
   };
@@ -132,7 +132,7 @@ describe('one app, in the administration', () => {
     assert.equal(apps().status('tasks')!.draft.versionId, editing);
     assert.equal(apps().status('tasks')!.draft.differs, true);
     assert.notEqual(fourth, third);
-    assert.ok((await apps().discardDraft('tasks')).ok);
+    assert.ok((await apps().discardDraft('tasks', apps().status('tasks')!.draft.updatedAt)).ok);
   });
 
   it('limits an app to the members an administrator lists', async () => {
@@ -220,7 +220,7 @@ describe('one app, in the administration', () => {
     assert.equal(draftIcon.width, 192);
     assert.notDeepEqual(draftIcon.bytes, platform.bytes);
     assert.deepEqual((await icon(LIVE, 'icon-192.png')).bytes, platform.bytes);
-    assert.ok((await apps().publishDraft('tasks')).ok);
+    assert.ok((await apps().publishDraft('tasks', apps().status('tasks')!.draft.versionId)).ok);
 
     const sizes = {
       'icon-192.png': 192,

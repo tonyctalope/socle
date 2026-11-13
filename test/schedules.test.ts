@@ -109,7 +109,7 @@ describe('scheduled functions', () => {
     assert.ok((await apps().saveDraft('chores', chores(SERVER), { id: bobId })).ok);
     // A draft's schedule does not run.
     assert.equal(await runSchedules(ctx.deps), 0);
-    assert.ok((await apps().publishDraft('chores')).ok);
+    assert.ok((await apps().publishDraft('chores', apps().status('chores')!.draft.versionId)).ok);
     await bob.navigate(`${LIVE}/`);
     await bob.navigate(`${DRAFT}/`);
 
@@ -161,7 +161,7 @@ describe('scheduled functions', () => {
     // A function that throws had its run: it is in the app's log, and it waits for the next occurrence.
     const failing = SERVER.replace("notify('others'", "throw new Error('no luck'); notify('others'");
     assert.ok((await apps().saveDraft('chores', chores(failing), { id: bobId })).ok);
-    assert.ok((await apps().publishDraft('chores')).ok);
+    assert.ok((await apps().publishDraft('chores', apps().status('chores')!.draft.versionId)).ok);
     at('2027-01-22T07:00:00Z');
     assert.equal(await runSchedules(ctx.deps), 1);
     assert.equal(await runSchedules(ctx.deps), 0);

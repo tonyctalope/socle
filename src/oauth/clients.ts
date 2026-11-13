@@ -357,8 +357,23 @@ export async function findClient(
   if (clientId.startsWith('https://')) {
     const cached = row && row.kind === 'cimd' ? row : undefined;
     if (cached?.expires_at && Date.parse(cached.expires_at) > Date.now()) return fromRow(cached);
+    // While its host is down, the last document read may still be used: for an hour at most
+    // after it was last read, never across a restart of this server, and not at all once the
+    // document was found withdrawn or wrong (that forgets the last good read).
+    const staleUntil = cached ? (lastGoodFetch.get(clientId) ?? -Infinity) + CIMD_STALE_MAX_MS : -Infinity;
+    const useStale = (reason: string) => {
+      run(db, 'UPDATE oauth_clients SET expires_at = :expires WHERE client_id = :id', {
+        expires: new Date(Math.min(Date.now() + CIMD_STALE_GRACE_MS, staleUntil)).toISOString(),
+        id: clientId,
+      });
+      console.warn(`oauth: using stale metadata for ${uriForLog(clientId)} (${reason})`);
+      return fromRow(cached!);
+    };
+    // A failure is remembered for a few minutes, for known clients as for unknown ones: a host
+    // that just failed is not asked again by every request that names it.
     const failedUntil = cimdFailures.get(clientId);
-    if (failedUntil && failedUntil > Date.now() && !cached) {
+    if (failedUntil && failedUntil > Date.now()) {
+      if (Date.now() < staleUntil) return useStale('its host failed a moment ago');
       throw new OAuthFailure('invalid_client', 'client metadata document unavailable, retry later');
     }
     try {
@@ -371,17 +386,8 @@ export async function findClient(
       if (error instanceof DocumentFailure) {
         if (cimdFailures.size >= 1000) cimdFailures.delete(cimdFailures.keys().next().value!);
         cimdFailures.set(clientId, Date.now() + CIMD_FAILURE_CACHE_MS);
-      }
-      const lastGood = lastGoodFetch.get(clientId) ?? 0;
-      if (cached && error instanceof DocumentFailure && error.transient && Date.now() - lastGood < CIMD_STALE_MAX_MS) {
-        // The client's host is down: keep using the last good document, for an hour at most
-        // after it was last read (and not at all across a restart of this server).
-        run(db, 'UPDATE oauth_clients SET expires_at = :expires WHERE client_id = :id', {
-          expires: new Date(Date.now() + CIMD_STALE_GRACE_MS).toISOString(),
-          id: clientId,
-        });
-        console.warn(`oauth: using stale metadata for ${uriForLog(clientId)} (${error.description})`);
-        return fromRow(cached);
+        if (!error.transient) lastGoodFetch.delete(clientId);
+        else if (Date.now() < staleUntil) return useStale(error.description);
       }
       console.warn(`oauth: client metadata refused for ${uriForLog(clientId)} (${(error as Error).message})`);
       throw error;

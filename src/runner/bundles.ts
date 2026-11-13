@@ -72,6 +72,21 @@ export class BundleStore {
 const REMOVED = '.removed';
 const REMOVED_DAYS = 30;
 
+/** Deletes for good what was set aside more than a month ago. Run with each night's copies. */
+export function purgeRemoved(appsDir: string, now = Date.now()): void {
+  const aside = path.join(appsDir, REMOVED);
+  let entries: string[];
+  try {
+    entries = readdirSync(aside);
+  } catch {
+    return; // nothing was ever removed
+  }
+  for (const entry of entries) {
+    const full = path.join(aside, entry);
+    if (now - statSync(full).mtimeMs > REMOVED_DAYS * 24 * 3600 * 1000) rmSync(full, { recursive: true, force: true });
+  }
+}
+
 /**
  * Takes an app's folder (its databases, their copies, its code) out of service by moving
  * it aside: a deletion asked by mistake can be undone by hand for a month. Returns false
@@ -81,10 +96,7 @@ export function removeApp(appsDir: string, app: string, now = Date.now()): boole
   if (!APP.test(app)) throw new Error(`invalid app name: ${app}`);
   const aside = path.join(appsDir, REMOVED);
   mkdirSync(aside, { recursive: true });
-  for (const entry of readdirSync(aside)) {
-    const full = path.join(aside, entry);
-    if (now - statSync(full).mtimeMs > REMOVED_DAYS * 24 * 3600 * 1000) rmSync(full, { recursive: true, force: true });
-  }
+  purgeRemoved(appsDir, now);
   const dir = path.join(appsDir, app);
   try {
     statSync(dir);

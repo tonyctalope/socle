@@ -20,6 +20,12 @@ export function adminRoutes(deps: Deps): Hono<ControlEnv> {
   const t = translator(config.locale);
   const app = new Hono<ControlEnv>();
   const limiter = new RateLimiter(30, 60_000);
+  /** What was just done here, by action and app, for the notice of the page that follows. */
+  const done = new Map<string, { name: string; time: number }>();
+  const record = (action: string, slug: string, name: string) => {
+    if (done.size > 200) done.clear();
+    done.set(`${action}:${slug}`, { name, time: Date.now() });
+  };
 
   app.use('/admin/*', async (c, next) => {
     const session = c.get('session');
@@ -43,18 +49,22 @@ export function adminRoutes(deps: Deps): Hono<ControlEnv> {
   const removable = (slug: string) => !(config.demoApp && slug === DEMO_SLUG);
 
   app.get('/admin/', (c) => {
-    // The address only names an app: what the notice says is read from the app's own state, so
-    // that a link from elsewhere cannot make this page announce what did not happen.
-    const done = (param: string) => deps.apps.status(c.req.query(param) ?? '');
-    const published = done('published');
-    const discarded = done('discarded');
-    const settled = (status: typeof published) => status?.live && !status.draft.differs;
-    const notice = settled(published)
-      ? t('{name} is published.', { name: published!.name })
-      : settled(discarded)
-        ? t('The draft of {name} was discarded.', { name: discarded!.name })
-        : c.req.query('removed') && !done('removed')
-          ? t('The app was removed.')
+    // A notice says what an administrator just did here: it is shown for a minute after the
+    // action itself, never because an address asks for it.
+    const did = (action: string) => {
+      const slug = c.req.query(action) ?? '';
+      const at = done.get(`${action}:${slug}`);
+      return at !== undefined && Date.now() - at.time < 60_000 ? at.name : null;
+    };
+    const published = did('published');
+    const discarded = did('discarded');
+    const removed = did('removed');
+    const notice = published
+      ? t('{name} is published.', { name: published })
+      : discarded
+        ? t('The draft of {name} was discarded.', { name: discarded })
+        : removed
+          ? t('{name} was removed.', { name: removed })
           : null;
     const rows = listApps(db).map((row) => ({
       row,
@@ -112,6 +122,7 @@ export function adminRoutes(deps: Deps): Hono<ControlEnv> {
                       ${
                         status.live
                           ? html`<form class="actions" method="post" action="/admin/apps/${row.slug}/discard">
+                              <input type="hidden" name="saved" value="${status.draft.updatedAt ?? ''}" />
                               <button class="secondary" type="submit">${t('Discard the draft')}</button>
                             </form>`
                           : ''
@@ -227,6 +238,9 @@ export function adminRoutes(deps: Deps): Hono<ControlEnv> {
     const slug = c.req.param('slug');
     const action = c.req.param('action');
     const status = deps.apps.status(slug);
+    // Asked twice (a double click on "Remove"): the first request did it, the second says so too.
+    if (!status && action === 'remove' && done.has(`removed:${slug}`))
+      return c.redirect(`/admin/?removed=${slug}`, 303);
     if (!status || !['publish', 'discard', 'remove', 'return', 'access'].includes(action)) {
       return c.text('Not found', 404);
     }
@@ -234,12 +248,15 @@ export function adminRoutes(deps: Deps): Hono<ControlEnv> {
     if (action === 'remove') {
       if (!removable(slug)) return c.text('Not found', 404);
       const removed = await deps.apps.remove(slug);
+      // Asked twice (a double click): the first request did it.
+      if (!removed.ok && removed.gone) return c.redirect(`/admin/?removed=${slug}`, 303);
       if (!removed.ok) {
         console.warn(`[${slug}] removal refused: ${removed.message}`);
         return c.html(messagePage(config.locale, t('Not removed'), t('The app is still there, unchanged.'), back), 409);
       }
       // An app created later under the same name is another app: nobody stays connected to it.
       revokeResource(db, appResource(config, slug));
+      record('removed', slug, status.name);
       console.info(`[${slug}] removed by ${c.get('session')!.user.email}`);
       return c.redirect(`/admin/?removed=${slug}`, 303);
     }
@@ -256,12 +273,17 @@ export function adminRoutes(deps: Deps): Hono<ControlEnv> {
         409,
       );
     };
+    const form = await c.req.parseBody({ all: true }).catch(() => ({}) as Record<string, unknown>);
     if (action === 'discard') {
-      const discarding = await deps.apps.discardDraft(slug);
+      // Like publishing: the form names the draft its page showed (by when it was last saved).
+      const discarding = await deps.apps.discardDraft(
+        slug,
+        typeof form.saved === 'string' && form.saved ? form.saved : null,
+      );
       if (!discarding.ok) return refusal(t('Not discarded'), discarding);
+      record('discarded', slug, status.name);
       return c.redirect(`/admin/?discarded=${slug}`, 303);
     }
-    const form = await c.req.parseBody({ all: true }).catch(() => ({}) as Record<string, unknown>);
     if (action === 'access') {
       // Only addresses of the allowlist can be listed: the form cannot name anyone else.
       const chosen = [form.email].flat().filter((email): email is string => typeof email === 'string');
@@ -287,6 +309,7 @@ export function adminRoutes(deps: Deps): Hono<ControlEnv> {
     if (!Number.isInteger(shown) || shown <= 0) return c.text('Invalid request', 400);
     const outcome = await deps.apps.publishDraft(slug, shown);
     if (!outcome.ok) return refusal(t('Not published'), outcome);
+    record('published', slug, deps.apps.status(slug)!.name);
     console.info(`[${slug}] version ${outcome.versionId} published by ${c.get('session')!.user.email}`);
     return c.redirect(`/admin/?published=${slug}`, 303);
   });

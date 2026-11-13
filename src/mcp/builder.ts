@@ -66,10 +66,10 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
     );
   /** A tool never answers with what an unexpected failure says (SQL, paths): that goes to the log. */
   const guarded =
-    <A>(name: string, handler: (args: A) => Promise<CallToolResult>) =>
-    async (args: A): Promise<CallToolResult> => {
+    <A, C>(name: string, handler: (args: A, context: C) => Promise<CallToolResult>) =>
+    async (args: A, context: C): Promise<CallToolResult> => {
       try {
-        return await handler(args);
+        return await handler(args, context);
       } catch (error) {
         console.error(`builder tool ${name} failed:`, (error as Error).message);
         return text('The platform could not do this right now. Try again in a moment.', true);
@@ -295,7 +295,7 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
         input: z.unknown().optional().describe("The function's input, as JSON."),
       }),
     },
-    guarded('call_function', async (args) => {
+    guarded('call_function', async (args, context: { mcpReq: { signal: AbortSignal } }) => {
       const row = getApp(db, args.app);
       if (!row) return unknown(args.app);
       const version = deps.apps.draft(args.app);
@@ -319,6 +319,7 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
         inputJson,
         // A scheduled function runs as the platform will run it: without a caller.
         caller: info.schedule ? null : { id: caller.id, name: displayName(caller) },
+        signal: context.mcpReq.signal,
       });
       if (result === 'busy' || result === 'gone') return text('The app is busy; try again in a moment.', true);
       if (result === 'unavailable') return text('The platform cannot run functions right now; try again later.', true);

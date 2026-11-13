@@ -1,6 +1,6 @@
-import { fromJsonSchema, McpServer, type CallToolResult } from '@modelcontextprotocol/server';
+import { fromJsonSchema, McpServer, type CallToolResult, type jsonSchemaValidator } from '@modelcontextprotocol/server';
 import { functionCaller, type FunctionCaller } from '../apphost/calls.ts';
-import { canAccess, type AppRow } from '../apps/registry.ts';
+import { canAccess, getApp, type AppRow } from '../apps/registry.ts';
 import { siteOf } from '../apps/slug.ts';
 import type { AppVersion } from '../apps/store.ts';
 import { displayName, type UserRow } from '../auth/users.ts';
@@ -22,7 +22,7 @@ export function toolsOf(version: AppVersion | null): FunctionInfo[] {
 }
 
 /** The app a resource URI names, when it is exactly the MCP endpoint of an app this member may use. */
-export function appOfResource(deps: Deps, resource: string, user: UserRow, find: (slug: string) => AppRow | undefined) {
+export function appOfResource(deps: Deps, resource: string, user: UserRow): AppRow | null {
   let url: URL;
   try {
     url = new URL(resource);
@@ -31,10 +31,21 @@ export function appOfResource(deps: Deps, resource: string, user: UserRow, find:
   }
   const suffix = `.${deps.config.appsDomain}${deps.config.portSuffix}`;
   if (!url.host.endsWith(suffix)) return null;
-  const app = find(url.host.slice(0, -suffix.length));
+  const app = getApp(deps.db, url.host.slice(0, -suffix.length));
   if (!app || resource !== appResource(deps.config, app.slug) || !canAccess(user, app)) return null;
   return toolsOf(deps.apps.live(app.slug)).length > 0 ? app : null;
 }
+
+/**
+ * A tool's input schema is the app's: it is advertised to the client as it was recorded (the
+ * build accepted nothing but the platform's small subset), and never compiled or interpreted
+ * by this process, which holds every secret and serves every app. The input is checked where
+ * the function runs, in the sandbox, against the same schema.
+ */
+const unchecked: jsonSchemaValidator = {
+  getValidator: () => (input: unknown) => ({ valid: true, data: input as never, errorMessage: undefined }),
+};
+const NO_INPUT = Object.freeze({ type: 'object', properties: {}, required: [], additionalProperties: false });
 
 const text = (value: string, isError = false): CallToolResult => ({
   content: [{ type: 'text', text: value }],
@@ -68,12 +79,10 @@ export function buildAppServer(
       {
         description: info.tool!,
         // The same description of the input the function checks its callers against.
-        inputSchema: fromJsonSchema<Record<string, unknown>>(
-          (info.input ?? { type: 'object', properties: {}, required: [], additionalProperties: false }) as never,
-        ),
+        inputSchema: fromJsonSchema<Record<string, unknown>>((info.input ?? NO_INPUT) as never, unchecked),
         annotations: { readOnlyHint: info.kind === 'query' },
       },
-      async (input) => {
+      async (input, context) => {
         let inputJson: string;
         try {
           inputJson = JSON.stringify(info.input ? input : null);
@@ -87,6 +96,8 @@ export function buildAppServer(
           info,
           inputJson,
           caller: { id: caller.id, name: displayName(caller) },
+          // An assistant that hung up is not waited for: its call leaves the line.
+          signal: context.mcpReq.signal,
         });
         if (result === 'busy' || result === 'gone') return text('The app is busy; try again in a moment.', true);
         if (result === 'unavailable') return text('The app cannot answer right now; try again later.', true);
