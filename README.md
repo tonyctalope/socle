@@ -15,7 +15,7 @@ It is made for a few people who know each other: an allowlist of e-mail addresse
 | 2    | Apps built without `npm install`, one SQLite database per app, sandboxed functions     | done    |
 | 3    | Agents create apps over MCP: drafts, an administrator publishes                        | done    |
 | 4    | One MCP server per app (its functions as tools)                                        | done    |
-| 4b   | Versions and rollback, per-app icons and access lists                                  | next    |
+| 4b   | Versions and rollback, per-app icons and access lists                                  | done    |
 | 5    | Scheduled functions, files and photos                                                  | planned |
 
 ## How it works
@@ -51,6 +51,7 @@ the platform.
 | File                   | Content                                                                 |
 | ---------------------- | ----------------------------------------------------------------------- |
 | `app.json`             | Name, description, colors                                               |
+| `icon.svg`             | The app's icon, as one square SVG picture (optional)                    |
 | `web/main.tsx`         | The screens, in React and Tailwind classes; exports the root component  |
 | `server/index.ts`      | The server functions: `query` to read, `mutation` to change             |
 | `migrations/NNN_*.sql` | The schema of the app's database, each file applied once, in name order |
@@ -114,8 +115,9 @@ that signs in with OAuth): the member signs in with their usual account and thei
 Everything an agent writes goes to the app's **draft**, served at `https://<app>--draft.<APPS_DOMAIN>` on a
 database of its own: members can try it, and nothing changes in the app they use. There is no tool that publishes
 and none that deletes. An administrator (`ADMIN_EMAILS`) publishes a draft from `<CONTROL_URL>/admin/`, after
-seeing which files it changes; the published database then gets the draft's migrations. The same page removes an app
-(its data is kept aside on the server for a month). Each member sees the applications they connected, and can
+seeing which files it changes; the published database then gets the draft's migrations. The same pages bring back an
+earlier version (when the data did not change shape since), choose which members can open an app, and remove an
+app (its data is kept aside on the server for a month). Each member sees the applications they connected, and can
 disconnect them, at `<CONTROL_URL>/connections`.
 
 ### Using an app from a conversation

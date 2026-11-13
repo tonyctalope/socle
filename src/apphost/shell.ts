@@ -32,7 +32,7 @@ function embeddedJson(value: unknown): string {
  * the same way and no inline script is ever needed. The boot data is a JSON block:
  * browsers do not execute it, the SDK reads it.
  */
-export function shellPage(app: AppRow, assetHash: string, boot: BootData, t: Translate, draft = false) {
+export function shellPage(app: AppRow, assetHash: string, boot: BootData, t: Translate, draft = false, iconStamp = '') {
   const title = draft ? `${app.name} (draft)` : app.name;
   return html`<!doctype html>
     <html lang="${boot.locale}">
@@ -45,8 +45,8 @@ export function shellPage(app: AppRow, assetHash: string, boot: BootData, t: Tra
         <meta name="color-scheme" content="light dark" />
         <meta name="theme-color" content="${app.theme_color}" />
         <link rel="manifest" href="/_socle/manifest.webmanifest" />
-        <link rel="icon" href="/_socle/icons/icon-192.png" type="image/png" />
-        <link rel="apple-touch-icon" href="/_socle/icons/apple-touch-icon.png" />
+        <link rel="icon" href="/_socle/icons/icon-192.png${iconStamp}" type="image/png" />
+        <link rel="apple-touch-icon" href="/_socle/icons/apple-touch-icon.png${iconStamp}" />
         <meta name="mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-title" content="${title}" />

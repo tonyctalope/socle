@@ -29,6 +29,8 @@ export interface AppVersion {
   functions: Map<string, FunctionInfo>;
   /** What the version's app.json says: its name, description and colors. */
   manifest: BuiltApp['manifest'];
+  /** The app's own icon files (PNG), by name. Null: the platform's icon. */
+  icons: Map<string, Uint8Array<ArrayBuffer>> | null;
 }
 
 export type DeployOutcome =
@@ -79,9 +81,10 @@ interface VersionRow {
   bundle_hash: string | null;
   functions: string;
   manifest: string;
+  icons: string | null;
 }
 
-const VERSION_COLUMNS = 'v.id, v.asset_hash, v.web_js, v.web_css, v.bundle_hash, v.functions, v.manifest';
+const VERSION_COLUMNS = 'v.id, v.asset_hash, v.web_js, v.web_css, v.bundle_hash, v.functions, v.manifest, v.icons';
 
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 
@@ -149,6 +152,14 @@ export class AppStore {
       bundleHash: row.bundle_hash,
       functions: new Map((JSON.parse(row.functions) as FunctionInfo[]).map((info) => [info.name, info])),
       manifest: JSON.parse(row.manifest) as BuiltApp['manifest'],
+      icons: row.icons
+        ? new Map(
+            Object.entries(JSON.parse(row.icons) as Record<string, string>).map(([name, png]) => [
+              name,
+              new Uint8Array(Buffer.from(png, 'base64')),
+            ]),
+          )
+        : null,
     };
     this.cache.set(id, version);
     this.cachedBytes += version.js.length + version.css.length;
@@ -213,16 +224,16 @@ export class AppStore {
   private record(
     slug: string,
     files: Record<string, string>,
-    built: Pick<BuiltApp, 'manifest' | 'web' | 'server' | 'migrations'>,
+    built: Pick<BuiltApp, 'manifest' | 'web' | 'server' | 'migrations'> & { icons?: BuiltApp['icons'] },
     createdBy: number | null,
     publishedAt: string | null,
   ): number {
     return run(
       this.db,
       `INSERT INTO app_versions (app, created_at, created_by, source_hash, asset_hash, files, manifest, web_js, web_css,
-         server_bundle, bundle_hash, functions, migrations, published_at)
+         server_bundle, bundle_hash, functions, migrations, published_at, icons)
        VALUES (:app, :now, :by, :source, :asset, :files, :manifest, :js, :css, :bundle, :hash, :functions, :migrations,
-         :published)`,
+         :published, :icons)`,
       {
         app: slug,
         now: new Date().toISOString(),
@@ -238,6 +249,7 @@ export class AppStore {
         functions: JSON.stringify(built.server?.functions ?? []),
         migrations: JSON.stringify(built.migrations),
         published: publishedAt,
+        icons: built.icons ? JSON.stringify(built.icons) : null,
       },
     ).lastInsertRowid;
   }
@@ -713,6 +725,67 @@ export class AppStore {
       this.onRemove(slug);
       return { ok: true };
     });
+  }
+
+  /** The versions members had, most recent first, and whether each can be made the published one again. */
+  versions(slug: string): { id: number; publishedAt: string; live: boolean; canReturn: boolean }[] {
+    const app = get<{ live_version: number | null }>(this.db, 'SELECT live_version FROM apps WHERE slug = :slug', {
+      slug,
+    });
+    const rows = all<{ id: number; published_at: string; migrations: string }>(
+      this.db,
+      `SELECT id, published_at, migrations FROM app_versions
+       WHERE app = :slug AND published_at IS NOT NULL ORDER BY id DESC LIMIT ${KEPT_VERSIONS}`,
+      { slug },
+    );
+    const current = rows.find((row) => row.id === app?.live_version);
+    return rows.map((row) => ({
+      id: row.id,
+      publishedAt: row.published_at,
+      live: row.id === app?.live_version,
+      // Migrations only go forward: an earlier version can come back when the data it expects
+      // is laid out exactly as it is now, not when the layout changed since.
+      canReturn: row.id !== app?.live_version && current !== undefined && row.migrations === current.migrations,
+    }));
+  }
+
+  /**
+   * Makes an earlier published version the published one again: its screens and functions,
+   * on the data as it is. Refused when the data's layout changed since that version (see
+   * `versions`). The draft is left alone.
+   */
+  returnTo(slug: string, versionId: number): Promise<DeployOutcome> {
+    return this.inTurn(slug, async () => {
+      const target = this.versions(slug).find((version) => version.id === versionId);
+      if (!target) return refused('there is no such published version of this app');
+      if (target.live) return refused('this version is the published one already');
+      if (!target.canReturn) {
+        return refused('the data changed shape since this version: publish a draft that fits it instead');
+      }
+      const row = get<{ manifest: string }>(this.db, 'SELECT manifest FROM app_versions WHERE id = :id', {
+        id: versionId,
+      })!;
+      transaction(this.db, () => {
+        // Nobody is editing: the draft address follows the published version, as it did.
+        run(
+          this.db,
+          `UPDATE apps SET draft_version = :id WHERE slug = :slug AND draft_version IS live_version
+             AND NOT EXISTS (SELECT 1 FROM app_drafts WHERE app = :slug)`,
+          { id: versionId, slug },
+        );
+        this.setLive(slug, versionId, JSON.parse(row.manifest) as BuiltApp['manifest'], new Date().toISOString());
+      });
+      this.onPublish(slug);
+      this.onDraft(slug);
+      return { ok: true, versionId, unchanged: false, applied: [] };
+    });
+  }
+
+  /** Limits an app to some members (their e-mail addresses), or opens it to every member (null). */
+  setAccess(slug: string, emails: readonly string[] | null): void {
+    const list =
+      emails === null ? null : JSON.stringify([...new Set(emails.map((email) => email.toLowerCase()))].sort());
+    run(this.db, 'UPDATE apps SET access = :list WHERE slug = :slug', { list, slug });
   }
 
   /** Where an app stands, for the people and agents who work on it. */

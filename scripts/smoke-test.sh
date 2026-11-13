@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Starts an image as the deployment does (a web container and a runner container
-# without network) and checks it from the outside: usage  scripts/smoke-test.sh <image>
+# Starts an image exactly as the deployment does, from compose.yaml (a web container and a
+# runner container without network), and checks it from the outside.
+#   usage: scripts/smoke-test.sh <image>
 set -euo pipefail
 image=${1:?usage: smoke-test.sh <image>}
+here=$(cd "$(dirname "$0")/.." && pwd)
 web=socle-smoke-$$
 runner=$web-runner
 port=${SMOKE_PORT:-8787}
@@ -11,24 +13,54 @@ demo=http://demo.apps.localhost:$port
 resolve=(--resolve "socle.localhost:$port:127.0.0.1" --resolve "demo.apps.localhost:$port:127.0.0.1")
 status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 expect() { [ "$2" = "$3" ] && echo "ok   $1" || { echo "FAIL $1: expected $2, got $3" >&2; exit 1; }; }
-data=$(mktemp -d)
+
+# A deployment folder of its own: the repository's compose.yaml, a .env, the data folders.
+dir=$(mktemp -d)
+data=$dir/data
+cp "$here/compose.yaml" "$dir/compose.yaml"
 mkdir -p "$data/apps" "$data/run"
 chmod -R 777 "$data" # the image's user is not the one running this script
+cat > "$dir/.env" <<ENV
+CONTROL_URL=http://socle.localhost:$port
+APPS_DOMAIN=apps.localhost
+ALLOWED_EMAILS=ci@example.com
+OIDC_ISSUER=https://accounts.example.com
+OIDC_CLIENT_ID=ci
+OIDC_CLIENT_SECRET=ci
+DEMO_APP=1
+SOCLE_CONTROL_HOST=socle.localhost
+ENV
+# Only what a test must change: the image under test, names that cannot clash with a real
+# deployment on the same machine, a port to reach it without a reverse proxy (which is told
+# to ignore it).
+cat > "$dir/compose.smoke.yaml" <<YAML
+services:
+  socle:
+    image: $image
+    container_name: $web
+    ports: ['127.0.0.1:$port:8787']
+    labels:
+      - traefik.enable=false
+  runner:
+    image: $image
+    container_name: $runner
+YAML
+compose() { docker compose -p "$web" --project-directory "$dir" -f "$dir/compose.yaml" -f "$dir/compose.smoke.yaml" "$@"; }
+# compose.yaml joins the reverse proxy's network, which a deployment already has.
+made_network=
+if ! docker network inspect frontend >/dev/null 2>&1; then
+  docker network create frontend >/dev/null
+  made_network=1
+fi
 cleanup() {
-  docker rm -f -v "$web" "$runner" >/dev/null 2>&1 || true
+  compose down -v --remove-orphans >/dev/null 2>&1 || true
+  [ -n "$made_network" ] && docker network rm frontend >/dev/null 2>&1 || true
   docker run --rm -v "$data:/data" --entrypoint sh "$image" -c 'rm -rf /data/* 2>/dev/null' >/dev/null 2>&1 || true
-  rm -rf "$data" 2>/dev/null || true
+  rm -rf "$dir" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-docker run -d --name "$runner" --network none --read-only --tmpfs /tmp --cap-drop ALL \
-  -e RUNNER_SOCKET=/run/socle/runner.sock -e APPS_DIR=/apps \
-  -v "$data/apps:/apps" -v "$data/run:/run/socle" "$image" node src/runner/main.ts >/dev/null
-docker run -d --name "$web" -p "$port:8787" --read-only --tmpfs /tmp \
-  -e CONTROL_URL="http://socle.localhost:$port" -e APPS_DOMAIN=apps.localhost \
-  -e ALLOWED_EMAILS=ci@example.com -e OIDC_ISSUER=https://accounts.example.com -e OIDC_CLIENT_ID=ci -e OIDC_CLIENT_SECRET=ci -e DEMO_APP=1 \
-  -e PORT=8787 -e DATA_DIR=/data -e RUNNER_SOCKET=/data/run/runner.sock \
-  -v "$data:/data" "$image" >/dev/null
+compose up -d >/dev/null
 for _ in $(seq 1 30); do curl -fsS "$base/healthz" >/dev/null 2>&1 && break; sleep 1; done
 # The demo app is built by the runner container right after start.
 for _ in $(seq 1 30); do docker logs "$web" 2>&1 | grep -q 'demo app published' && break; sleep 1; done

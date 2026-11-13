@@ -78,6 +78,15 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
     return c.json({ ok: true, runner: await deps.runner.healthy() });
   });
 
+  // An app's icon as the home page shows it: its own when its published version has one.
+  app.get('/icons/app/:slug', (c) => {
+    const own = deps.apps.live(c.req.param('slug'))?.icons?.get('icon-192.png');
+    const file = icons.get('/icon-192.png');
+    if (own) return c.body(own, 200, { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' });
+    if (!file) return c.text('Not found', 404);
+    return c.body(file.body, 200, { 'Content-Type': file.type, 'Cache-Control': 'public, max-age=86400' });
+  });
+
   app.get('/icons/:file', (c) => {
     const file = icons.get(`/${c.req.param('file')}`);
     if (!file) return c.text('Not found', 404);
@@ -133,7 +142,7 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
                     (row) =>
                       html`<li>
                         <a href="${appOrigin(config, row.slug)}/">
-                          <img src="/icons/icon-192.png" alt="" />
+                          <img src="/icons/app/${row.slug}?v=${row.live_version}" alt="" />
                           <div><strong>${row.name}</strong><span>${row.description}</span></div>
                         </a>
                       </li>`,

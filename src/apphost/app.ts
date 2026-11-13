@@ -1,6 +1,7 @@
 import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { appMembers, canAccess, getApp } from '../apps/registry.ts';
+import type { Site } from '../apps/slug.ts';
 import { DEFAULT_COLOR, type AppVersion } from '../apps/store.ts';
 import { clearAppCookie, readAppCookie, setAppCookie } from '../auth/cookies.ts';
 import {
@@ -92,8 +93,22 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
     await next();
   });
 
+  /** What the address serves now: the draft's last build, or the published version. */
+  const servedAt = (site: Site) => deps.apps.serving(site.slug, site.draft ? 'draft' : 'live');
+  /** Added to icon addresses: it changes when the app's icon may have. */
+  const iconStamp = (site: Site) => {
+    const version = servedAt(site);
+    return version?.icons ? `?v=${version.id}` : '';
+  };
+
+  // Icons are fetched without cookies (to install the app, to show a notification): the app's
+  // own when its version has one, the platform's otherwise, and on pages shown for no app.
   app.get(`${ICONS}/:file`, (c) => {
-    const file = icons.get(`/${c.req.param('file')}`);
+    const name = c.req.param('file');
+    const site = appSiteFromHost(config, new URL(c.req.url).host.toLowerCase());
+    const own = site ? servedAt(site)?.icons?.get(name) : undefined;
+    if (own) return c.body(own, 200, { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' });
+    const file = icons.get(`/${name}`);
     if (!file) return c.text('Not found', 404);
     return send(c, file, { 'Cache-Control': 'public, max-age=86400' });
   });
@@ -141,10 +156,14 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
     return c.body(asset.body, 200, headers);
   });
   app.get('/_socle/manifest.webmanifest', (c) =>
-    c.body(JSON.stringify(appManifest(c.get('app'), config.locale, c.get('site').draft)), 200, {
-      'Content-Type': 'application/manifest+json',
-      'Cache-Control': 'no-cache',
-    }),
+    c.body(
+      JSON.stringify(appManifest(c.get('app'), config.locale, c.get('site').draft, iconStamp(c.get('site')))),
+      200,
+      {
+        'Content-Type': 'application/manifest+json',
+        'Cache-Control': 'no-cache',
+      },
+    ),
   );
 
   app.use('*', async (c, next) => {
@@ -481,7 +500,7 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
       const why = draft ? t('This app has no draft that builds yet.') : t('This app has no published version yet.');
       return c.html(message(c.get('app').name, why), 404);
     }
-    return c.html(shellPage(c.get('app'), version.assetHash, boot(c), t, draft), 200, {
+    return c.html(shellPage(c.get('app'), version.assetHash, boot(c), t, draft, iconStamp(c.get('site'))), 200, {
       'Cache-Control': 'no-store',
     });
   });
