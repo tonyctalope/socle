@@ -244,7 +244,9 @@ the runner's processes itself.
 
 ## Deployment
 
-The image `ghcr.io/tonyctalope/socle` is built by CI (amd64 and arm64). You need:
+The image `ghcr.io/tonyctalope/socle` is built by CI (amd64 and arm64). `compose.yaml` follows `latest`, the
+main branch; to stay on a release instead, name it (`:1.0.0`, or `:1.0` and `:1` for the latest of a line). You
+need:
 
 1. Two DNS entries pointing at the server: the control plane's, and a wildcard `*.<APPS_DOMAIN>`.
 2. A reverse proxy that terminates TLS, with a certificate for the control plane and a wildcard certificate for
