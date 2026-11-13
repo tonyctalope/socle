@@ -11,6 +11,12 @@ import { BuildFailure } from './files.ts';
 export const ICON_FILE = 'icon.svg';
 /** Larger than any reasonable icon drawn by hand or by an agent. */
 const MAX_ICON_BYTES = 64 * 1024;
+/**
+ * What the PNG files of one icon may weigh together: every version keeps its own, and they are
+ * served from memory. Plain shapes give a few dozen KiB; a small SVG that asks for noise or
+ * heavy filters gives megabytes.
+ */
+const MAX_RENDERED_BYTES = 512 * 1024;
 
 /** The files served under /_socle/icons/ for an app that has its own icon, as base64 PNG. */
 export type AppIcons = Record<(typeof ICON_NAMES)[number], string>;
@@ -71,13 +77,24 @@ export async function buildIcons(svg: string, background: string): Promise<AppIc
   await rasterizer();
   try {
     const maskable = onBackground(svg, background, 0.8);
-    return {
+    const icons: AppIcons = {
       'icon-192.png': render(svg, 192),
       'icon-512.png': render(svg, 512),
       'icon-maskable-192.png': render(maskable, 192),
       'icon-maskable-512.png': render(maskable, 512),
       'apple-touch-icon.png': render(onBackground(svg, background, 1), 180),
     };
+    // Base64 text: four characters for three bytes.
+    const bytes = Object.values(icons).reduce((sum, png) => sum + Math.floor((png.length * 3) / 4), 0);
+    if (bytes > MAX_RENDERED_BYTES) {
+      throw new BuildFailure([
+        {
+          file: ICON_FILE,
+          message: `the icon is too heavy once drawn (${Math.round(bytes / 1024)} KiB of pictures, limit ${MAX_RENDERED_BYTES / 1024}): draw it with plain shapes, without noise or heavy filters`,
+        },
+      ]);
+    }
+    return icons;
   } catch (error) {
     if (error instanceof BuildFailure) throw error;
     const reason = String((error as Error)?.message ?? error).slice(0, 200);

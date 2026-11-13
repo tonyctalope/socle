@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
+import { AppStore } from '../src/apps/store.ts';
 import { DEFAULT_LIMITS } from '../src/runner/limits.ts';
 import { ALICE, BOB, Browser, CONTROL, setup, signIn, type TestContext } from './helpers.ts';
 
@@ -206,6 +207,11 @@ describe('one app, in the administration', () => {
         /must be square/,
       ],
       [`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><!--${'x'.repeat(70_000)}--></svg>`, /too large/],
+      // A few characters that draw megabytes: every version would keep them, and serve them from memory.
+      [
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><filter id="n"><feTurbulence baseFrequency="0.9" numOctaves="4"/></filter><rect width="100" height="100" filter="url(#n)"/></svg>',
+        /too heavy once drawn/,
+      ],
     ] as const) {
       const refused = await apps().saveDraft('tasks', withIcon(svg), { id: adminId });
       assert.equal(refused.ok, false);
@@ -257,6 +263,37 @@ describe('one app, in the administration', () => {
       platform.bytes,
     );
     assert.equal((await admin.request(`${CONTROL}/icons/app/nope`)).status, 200);
+  });
+
+  it('counts an app’s icons in what the cache of versions may hold', async () => {
+    const before = apps().live('tasks')!;
+    const icons = [...before.icons!.values()].reduce((sum, png) => sum + png.length, 0);
+    assert.ok(icons > 5_000);
+    // Another published version with its own icon and its own screens.
+    const files = apps().files('tasks', 'live')!;
+    await publish({
+      ...files,
+      'icon.svg': files['icon.svg']!.replace('#4f46e5', '#0f766e'),
+      'web/main.tsx': 'export default function App() { return <p>other</p>; }',
+    });
+    const after = apps().live('tasks')!;
+    assert.notEqual(after.assetHash, before.assetHash);
+
+    // A cache with room for one of the two, icons included.
+    const probe = new AppStore(ctx.deps.db, ctx.deps.runner);
+    probe.live('tasks');
+    const one = probe.cached();
+    assert.equal(one.versions, 1);
+    const weight = [...after.icons!.values()].reduce((sum, png) => sum + png.length, 0);
+    assert.equal(one.bytes, after.js.length + after.css.length + weight);
+    const small = new AppStore(ctx.deps.db, ctx.deps.runner, { cacheBytes: one.bytes + Math.round(icons / 2) });
+    assert.ok(small.byAssetHash('tasks', before.assetHash, 'live'));
+    assert.ok(small.live('tasks'));
+    assert.equal(small.cached().versions, 1);
+    assert.ok(small.cached().bytes <= one.bytes + Math.round(icons / 2));
+    // Both are still served, each read again when it is asked for.
+    assert.equal(small.byAssetHash('tasks', before.assetHash, 'live')!.id, before.id);
+    assert.equal(small.live('tasks')!.id, after.id);
   });
 
   it('refuses files that lost a migration the data already ran', async () => {

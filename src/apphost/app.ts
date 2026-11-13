@@ -500,6 +500,7 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
     if (c.req.method !== 'GET') return c.body(null, 405, { Allow: 'GET' });
     const session = c.get('session')!;
     const slug = c.get('site').label;
+    const appSlug = c.get('app').slug;
     const encoder = new TextEncoder();
     let release = () => {};
     const stream = new ReadableStream<Uint8Array>({
@@ -530,9 +531,11 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
           controller.close();
           return;
         }
-        // A stream outlives the request that opened it: the session is checked again on every beat.
+        // A stream outlives the request that opened it: on every beat the session is checked
+        // again, and that the app is still this member's to open.
         const beat = setInterval(() => {
-          if (!sessionStillValid(db, session, isAllowed)) close();
+          const row = getApp(db, appSlug);
+          if (!row || !canAccess(session.user, row) || !sessionStillValid(db, session, isAllowed)) close();
           else write(': ping\n\n');
         }, deps.streamPingMs ?? STREAM_PING_MS);
         release = () => {
