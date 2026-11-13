@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { boot, words } from './boot.ts';
 import { request } from './http.ts';
+import { pathToOpen } from './navigate.ts';
 
 const TEXT = words({ en: { failed: 'Something went wrong.' }, fr: { failed: 'Une erreur est survenue.' } });
 
@@ -36,6 +37,14 @@ const registration: Promise<ServiceWorkerRegistration | null> =
         return null;
       })
     : Promise.resolve(null);
+
+// A notification tapped while this page is open: go to the page it is about.
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    const path = pathToOpen(event.data, location);
+    if (path !== null) location.assign(path);
+  });
+}
 
 // A browser subscription can outlive what the server knows (sign-out, another member
 // signing in, an endpoint that changed): tell the server again on every page load.

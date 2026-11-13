@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { WebPushError } from 'web-push';
 import { all, get } from '../src/db/database.ts';
+import { pathToOpen } from '../src/kit/sdk/navigate.ts';
 import { createPushService, saveSubscription } from '../src/push/push.ts';
 import { Browser, DEMO, NOTES, setup, signIn, subscription, BOB } from './helpers.ts';
 
@@ -162,5 +164,26 @@ describe('push delivery', () => {
     assert.match(service.publicKey, /^[A-Za-z0-9_-]{80,100}$/); // generated once, then read back
     assert.equal(createPushService(ctx.deps.db, ctx.deps.config).publicKey, service.publicKey);
     ctx.cleanup();
+  });
+});
+
+describe('a notification that is tapped', () => {
+  it('opens the page it is about in the app that is already open', () => {
+    const here = { origin: 'https://demo.apps.test', pathname: '/list', search: '?tab=mine', hash: '' };
+    const asked = (url: unknown, type: unknown = 'socle:navigate') => pathToOpen({ type, url }, here);
+    assert.equal(asked('/items/42?from=push#top'), '/items/42?from=push#top');
+    assert.equal(asked('/'), '/');
+    // Already there: nothing to load again.
+    assert.equal(asked('/list?tab=mine'), null);
+    // Only ever a page of this app, and only that message.
+    assert.equal(asked('https://elsewhere.example/items/42'), null);
+    assert.equal(asked('//elsewhere.example/items/42'), null);
+    assert.equal(asked(42), null);
+    assert.equal(asked('/items/42', 'something-else'), null);
+    assert.equal(pathToOpen('socle:navigate', here), null);
+    assert.equal(pathToOpen(null, here), null);
+    // What the worker says is what the page listens to.
+    assert.match(readFileSync('src/client/sw.js', 'utf8'), /postMessage\(\{ type: 'socle:navigate', url: path \}\)/);
+    assert.match(readFileSync('src/kit/sdk/platform.ts', 'utf8'), /pathToOpen\(event\.data, location\)/);
   });
 });

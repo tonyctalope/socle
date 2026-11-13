@@ -51,7 +51,7 @@ async function openApp(path) {
   for (const client of windows) {
     if (new URL(client.url).origin !== self.location.origin) continue;
     await client.focus();
-    // The page may route itself without a reload by listening to this message.
+    // The SDK in the page listens to this and goes there (src/kit/sdk/navigate.ts).
     client.postMessage({ type: 'socle:navigate', url: path });
     return;
   }
