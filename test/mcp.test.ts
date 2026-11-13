@@ -152,6 +152,15 @@ describe('the builder: an agent creates an app over MCP', () => {
     return connected;
   }
 
+  /** An administrator's click on "Publish the draft": the form carries the draft version its page showed. */
+  const publishChores = (cookie: string) =>
+    fetch(`${origin}/admin/apps/chores/publish`, {
+      method: 'POST',
+      headers: { cookie, origin, 'content-type': 'application/x-www-form-urlencoded' },
+      body: `version=${ctx.deps.apps.status('chores')!.draft.versionId}`,
+      redirect: 'manual',
+    });
+
   const tool = async (name: string, args: Record<string, unknown> = {}, from: Client = client) => {
     const result = await from.callTool({ name, arguments: args });
     const text = (result.content as { type: string; text?: string }[]).find((item) => item.type === 'text')?.text ?? '';
@@ -321,6 +330,54 @@ describe('the builder: an agent creates an app over MCP', () => {
 
     const removed = await tool('write_files', { app: 'chores', delete: ['nope.ts'] });
     assert.equal(removed.isError, true);
+
+    // Files of the wrong shape are refused before anything is kept: the draft is what it was.
+    const before = ctx.deps.apps.files('chores', 'draft');
+    const outside = await tool('write_files', {
+      app: 'chores',
+      files: [{ path: '../../outside.txt', content: 'x' }],
+    });
+    assert.equal(outside.isError, true);
+    assert.equal(outside.json().saved, false);
+    assert.deepEqual(ctx.deps.apps.files('chores', 'draft'), before);
+    const longPath = await tool('write_files', { app: 'chores', files: [{ path: 'p'.repeat(500), content: 'x' }] });
+    assert.equal(longPath.isError, true);
+    const huge = await tool('write_files', {
+      app: 'chores',
+      files: [{ path: 'shared/big.ts', content: 'x'.repeat(600 * 1024) }],
+    });
+    assert.equal(huge.isError, true);
+    assert.deepEqual(ctx.deps.apps.files('chores', 'draft'), before);
+
+    // Two edits at once both land: each is applied to the draft as it is when its turn comes.
+    const [one, two] = await Promise.all([
+      tool('write_files', { app: 'chores', files: [{ path: 'shared/a.ts', content: 'export const a = 1;' }] }),
+      tool('write_files', { app: 'chores', files: [{ path: 'shared/b.ts', content: 'export const b = 2;' }] }),
+    ]);
+    assert.equal(one.json().built, true, one.text);
+    assert.equal(two.json().built, true, two.text);
+    const both = ctx.deps.apps.files('chores', 'draft')!;
+    assert.equal(both['shared/a.ts'], 'export const a = 1;');
+    assert.equal(both['shared/b.ts'], 'export const b = 2;');
+    // A third one while one runs and one waits is told to come back, and changes nothing.
+    const burst = await Promise.all(
+      ['c', 'd', 'e'].map((name) =>
+        tool('write_files', { app: 'chores', files: [{ path: `shared/${name}.ts`, content: 'export {};' }] }),
+      ),
+    );
+    assert.deepEqual(
+      burst.map((answer) => answer.json().saved),
+      [true, true, false],
+    );
+    assert.match(burst[2]!.text, /already waiting for its turn/);
+    assert.equal(Object.hasOwn(ctx.deps.apps.files('chores', 'draft')!, 'shared/e.ts'), false);
+
+    // The demo app is the platform's: no agent creates or edits an app of that name.
+    assert.equal((await tool('create_app', { app: 'demo', name: 'Mine' })).isError, true);
+    assert.equal(
+      (await tool('write_files', { app: 'demo', files: [{ path: 'app.json', content: '{}' }] })).isError,
+      true,
+    );
     assert.equal((await tool('read_files', { app: 'ghost' })).isError, true);
   });
 
@@ -333,10 +390,8 @@ describe('the builder: an agent creates an app over MCP', () => {
     assert.equal(ctx.deps.apps.status('chores')!.live, null);
 
     // The member whose agent wrote the app cannot publish it either; the administrator can.
-    const publish = (cookie: string) =>
-      fetch(`${origin}/admin/apps/chores/publish`, { method: 'POST', headers: { cookie, origin }, redirect: 'manual' });
-    assert.equal((await publish(aliceCookie)).status, 403);
-    assert.equal((await publish(browserOf(BOB))).status, 303);
+    assert.equal((await publishChores(aliceCookie)).status, 403);
+    assert.equal((await publishChores(browserOf(BOB))).status, 303);
     const after = (await tool('list_apps')).json().apps.find((app: { app: string }) => app.app === 'chores');
     assert.ok(after.published.url.startsWith('http://chores.apps.localhost'));
     assert.equal(after.draft.waiting_for_publication, false);
@@ -423,12 +478,7 @@ describe('the builder: an agent creates an app over MCP', () => {
     );
     // Still a draft: nothing is offered until an administrator publishes.
     assert.equal((await rpc(appMcp)).status, 404);
-    const published = await fetch(`${origin}/admin/apps/chores/publish`, {
-      method: 'POST',
-      headers: { cookie: browserOf(BOB), origin },
-      redirect: 'manual',
-    });
-    assert.equal(published.status, 303);
+    assert.equal((await publishChores(browserOf(BOB))).status, 303);
     const listed = (await tool('list_apps', {}, builder)).json();
     assert.equal(listed.apps.find((app: { app: string }) => app.app === 'chores').published.mcp_url, appMcp.href);
 

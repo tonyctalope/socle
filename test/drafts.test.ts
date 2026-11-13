@@ -163,7 +163,7 @@ describe('a draft, from the first file to its publication', () => {
     assert.equal(apps().files('tasks', 'draft')!['web/main.tsx'], 'export default function (');
     assert.deepEqual(await apps().publishDraft('tasks'), {
       ok: false,
-      stage: 'build',
+      stage: 'refused',
       problems: [{ message: 'the draft does not build' }],
     });
     assert.deepEqual(await value(await call(LIVE, 'list')), [{ id: 1, label: 'real work' }]);
@@ -195,7 +195,7 @@ describe('a draft, from the first file to its publication', () => {
     assert.deepEqual(await ctx.deps.runner.migrate('tasks/live', [], { reset: true }), {
       ok: false,
       migration: null,
-      message: 'the published database is never emptied',
+      message: 'only a draft database can be emptied',
     });
     // Back to a draft that fits the published data.
     const fits = tasks({ 'migrations/002_done.sql': 'ALTER TABLE tasks ADD COLUMN done INTEGER NOT NULL DEFAULT 0;' });
@@ -270,10 +270,41 @@ describe('publishing is an administrator’s decision', () => {
       assert.equal((await admin.request(`${CONTROL}/admin/apps/tasks/publish`, { method: 'POST' })).status, 403);
       assert.equal(ctx.deps.apps.status('tasks')!.live, null);
 
-      const published = await post(admin, '/admin/apps/tasks/publish');
+      // The form names the draft the page showed. A draft built again since is not published in
+      // its place: the administrator's decision was about what they saw.
+      const publish = (shown: string) =>
+        admin.request(`${CONTROL}/admin/apps/tasks/publish`, {
+          method: 'POST',
+          headers: { origin: CONTROL, 'content-type': 'application/x-www-form-urlencoded' },
+          body: `version=${shown}`,
+        });
+      const shownVersion = () =>
+        admin
+          .request(`${CONTROL}/admin/`)
+          .then((response) => response.text())
+          .then(
+            (html) =>
+              /action="\/admin\/apps\/tasks\/publish">\s*<input type="hidden" name="version" value="(\d+)"/.exec(
+                html,
+              )![1]!,
+          );
+      const seen = await shownVersion();
+      const rewritten = tasks({ 'shared/late.ts': 'export const late = true;' });
+      assert.ok((await ctx.deps.apps.saveDraft('tasks', rewritten, { id: userId })).ok);
+      const stale = await publish(seen);
+      assert.equal(stale.status, 409);
+      assert.match(await stale.text(), /the draft changed since it was shown/);
+      assert.equal(ctx.deps.apps.status('tasks')!.live, null);
+      assert.equal((await post(admin, '/admin/apps/tasks/publish')).status, 400); // a form without its version
+
+      const published = await publish(await shownVersion());
       assert.equal(published.status, 303);
-      assert.match(published.headers.get('location')!, /^\/admin\/\?published=Tasks$/);
+      assert.equal(published.headers.get('location'), '/admin/?published=tasks');
       assert.ok(ctx.deps.apps.status('tasks')!.live);
+      // The notice is read from the app's state, not from the address.
+      assert.match(await (await admin.request(`${CONTROL}/admin/?published=tasks`)).text(), /Tasks is published\./);
+      assert.doesNotMatch(await (await admin.request(`${CONTROL}/admin/?published=Payroll`)).text(), /is published\./);
+      assert.doesNotMatch(await (await admin.request(`${CONTROL}/admin/?removed=tasks`)).text(), /was removed/);
       assert.equal((await post(admin, '/admin/apps/nope/publish')).status, 404);
 
       // An edit that is given up: the draft is the published version again.
@@ -284,12 +315,12 @@ describe('publishing is an administrator’s decision', () => {
       const status = ctx.deps.apps.status('tasks')!;
       assert.equal(status.draft.differs, false);
       assert.equal(status.draft.versionId, status.live?.versionId);
-      assert.deepEqual(ctx.deps.apps.files('tasks', 'draft'), tasks());
+      assert.deepEqual(ctx.deps.apps.files('tasks', 'draft'), rewritten);
 
       // A draft the published data refuses: said on the page, and members keep what they had.
       const clash = tasks({ 'migrations/001_init.sql': 'CREATE TABLE tasks (id INTEGER PRIMARY KEY, other TEXT);' });
       assert.ok((await ctx.deps.apps.saveDraft('tasks', clash, { id: userId }, { resetData: true })).ok);
-      const refused = await post(admin, '/admin/apps/tasks/publish');
+      const refused = await publish(await shownVersion());
       assert.equal(refused.status, 409);
       assert.match(await refused.text(), /Nothing changed for the members\./);
       assert.equal(ctx.deps.apps.status('tasks')!.live?.versionId, status.live?.versionId);
@@ -330,7 +361,8 @@ describe('removing an app', () => {
       assert.equal((await post(admin, LIVE)).status, 403);
       const removed = await post(admin);
       assert.equal(removed.status, 303);
-      assert.match(removed.headers.get('location')!, /removed=Tasks/);
+      assert.equal(removed.headers.get('location'), '/admin/?removed=tasks');
+      assert.match(await (await admin.request(`${CONTROL}/admin/?removed=tasks`)).text(), /The app was removed\./);
 
       assert.equal(apps.status('tasks'), null);
       assert.doesNotMatch(await (await member.request(`${CONTROL}/`)).text(), /tasks\.apps\.test/);

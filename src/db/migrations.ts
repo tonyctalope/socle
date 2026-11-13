@@ -131,4 +131,7 @@ export const MIGRATIONS: readonly string[] = [
   CREATE INDEX app_logs_app ON app_logs(app, id);
   `,
   /* 5 — the authorization server MCP clients sign in with */ OAUTH_SCHEMA,
+  /* 6 — an app published before drafts existed serves its published version as its draft */ `
+  UPDATE apps SET draft_version = live_version WHERE draft_version IS NULL;
+  `,
 ];

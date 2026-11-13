@@ -127,8 +127,9 @@ export function oauthRoutes(deps: OAuthDeps, resolve: ResourceResolver): Hono<Co
   const toSignIn = (c: Context, next: string) => c.redirect(`/auth/start?next=${encodeURIComponent(next)}`, 302);
 
   // Clients that run in a browser read the metadata and call the token endpoints from
-  // their own origin. None of these routes looks at a cookie, and registration stays out:
-  // a web page has no business registering clients in a visitor's name.
+  // their own origin. None of these routes looks at a cookie. Registration stays out: a web
+  // page has no business registering clients in a visitor's name, so that route has no CORS
+  // headers and refuses what a page of another site can send without them (see below).
   const openCors = cors({
     origin: '*',
     allowMethods: ['GET', 'POST', 'OPTIONS'],
@@ -144,6 +145,15 @@ export function oauthRoutes(deps: OAuthDeps, resolve: ResourceResolver): Hono<Co
   app.post('/oauth/register', async (c) => {
     if (!registerLimiter.take(clientIp(c))) {
       return oauthError(c, new OAuthFailure('invalid_client_metadata', 'too many registrations, retry later', 429));
+    }
+    // A page of another site can post text without asking (no preflight), in its visitor's
+    // name and from their address: only JSON sent as JSON is read, and never from such a page.
+    const site = c.req.header('sec-fetch-site');
+    if (site !== undefined && site !== 'none' && site !== 'same-origin') {
+      return oauthError(c, new OAuthFailure('invalid_client_metadata', 'registration is not open to web pages', 403));
+    }
+    if (!(c.req.header('content-type') ?? '').toLowerCase().startsWith('application/json')) {
+      return oauthError(c, new OAuthFailure('invalid_client_metadata', 'send the metadata as application/json'));
     }
     const body = await c.req.json().catch(() => null);
     try {

@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { isValidSlug, parseSite, type Site } from './apps/slug.ts';
+import { parseSite, type Site } from './apps/slug.ts';
 import { isLocale, LOCALES, type Locale } from './i18n.ts';
 import { loadOAuthConfig, type OAuthConfig } from './oauth/config.ts';
 
@@ -186,14 +186,6 @@ export function appSiteFromHost(config: Config, host: string): Site | null {
   const suffix = `.${config.appsDomain}${config.portSuffix}`;
   if (!host.endsWith(suffix)) return null;
   return parseSite(host.slice(0, -suffix.length));
-}
-
-/** The app a request host belongs to: exactly one valid label in front of the apps domain. */
-export function appSlugFromHost(config: Config, host: string): string | null {
-  const suffix = `.${config.appsDomain}${config.portSuffix}`;
-  if (!host.endsWith(suffix)) return null;
-  const slug = host.slice(0, -suffix.length);
-  return isValidSlug(slug) ? slug : null;
 }
 
 /** The calendar date (YYYY-MM-DD) where the members live. */

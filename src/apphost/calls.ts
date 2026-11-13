@@ -33,7 +33,22 @@ export type FunctionOutcome = CallResult | 'busy' | 'gone' | 'unavailable';
 
 export type FunctionCaller = (call: FunctionCall) => Promise<FunctionOutcome>;
 
+const callers = new WeakMap<Deps, FunctionCaller>();
+
+/**
+ * The one caller of a platform: screens, the builder and the apps' own MCP endpoints share
+ * its limits (how many notifications a member gets, how many calls an app runs at once).
+ */
 export function functionCaller(deps: Deps): FunctionCaller {
+  let caller = callers.get(deps);
+  if (!caller) {
+    caller = createCaller(deps);
+    callers.set(deps, caller);
+  }
+  return caller;
+}
+
+function createCaller(deps: Deps): FunctionCaller {
   const { config, db } = deps;
   const isAllowed = allowlist(config);
   deps.gate ??= new CallGate();
@@ -87,7 +102,8 @@ export function functionCaller(deps: Deps): FunctionCaller {
       });
     let result: CallResult | 'busy' | 'gone';
     try {
-      result = await gate.run(site.label, signal ?? new AbortController().signal, async () => {
+      // One budget for the app's two addresses; the draft may hold a single place of it.
+      const turn = async () => {
         const first = await send();
         if (first.ok || first.error.code !== 'bundle_missing') return first;
         // The runner lost this app's code (a fresh volume, for instance): give it again, once.
@@ -95,7 +111,8 @@ export function functionCaller(deps: Deps): FunctionCaller {
         if (bundle === null) return first;
         await deps.runner.install(app.slug, bundle);
         return send();
-      });
+      };
+      result = await gate.run(app.slug, signal, turn, site.draft ? 1 : undefined);
     } catch (error) {
       if (!(error instanceof RunnerUnavailable)) throw error;
       console.error(`runner unavailable (${error.code}): ${error.message}`);

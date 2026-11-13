@@ -1,7 +1,7 @@
 import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { appMembers, canAccess, getApp } from '../apps/registry.ts';
-import type { AppVersion } from '../apps/store.ts';
+import { DEFAULT_COLOR, type AppVersion } from '../apps/store.ts';
 import { clearAppCookie, readAppCookie, setAppCookie } from '../auth/cookies.ts';
 import {
   APP_COOKIE,
@@ -104,7 +104,21 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
     if (!site || !row) {
       return c.html(message(t('App not found'), t('There is no app at this address.')), 404);
     }
-    c.set('app', row);
+    // The draft's address shows what the draft's app.json says: a new name or new colors are
+    // tried like the rest. Everything else about the app is the app's.
+    const card = site.draft ? deps.apps.draft(row.slug)?.manifest : undefined;
+    c.set(
+      'app',
+      card
+        ? {
+            ...row,
+            name: card.name,
+            description: card.description,
+            theme_color: card.themeColor ?? DEFAULT_COLOR,
+            background_color: card.backgroundColor ?? DEFAULT_COLOR,
+          }
+        : row,
+    );
     c.set('site', site);
     await next();
   });
@@ -444,7 +458,11 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
   // The files of a version never change, so browsers keep them for good. A page opened
   // before a publication keeps finding its own files under the hash it was given.
   app.get('/assets/:hash/:file', (c) => {
-    const version: AppVersion | null = deps.apps.byAssetHash(c.get('app').slug, c.req.param('hash'));
+    const version: AppVersion | null = deps.apps.byAssetHash(
+      c.get('app').slug,
+      c.req.param('hash'),
+      c.get('site').draft ? 'draft' : 'live',
+    );
     const file = c.req.param('file');
     const body = file === 'main.js' ? version?.js : file === 'style.css' ? version?.css : undefined;
     if (!body) return c.text('Not found', 404);

@@ -488,7 +488,11 @@ describe('an app, from its sources to the browser', () => {
     assert.deepEqual({ ...(colors() as object) }, { theme_color: '#f4f1ea', background_color: '#f4f1ea' });
     assert.equal(count(), 20);
     assert.equal(ctx.deps.apps.live('palette')!.id, last);
-    assert.equal(ctx.deps.apps.byAssetHash('palette', firstAssets), null, 'the oldest ones are gone, from memory too');
+    assert.equal(
+      ctx.deps.apps.byAssetHash('palette', firstAssets, 'live'),
+      null,
+      'the oldest ones are gone, from memory too',
+    );
     assert.ok(publish(25, {}) > last, 'and an id is never given twice');
   });
 

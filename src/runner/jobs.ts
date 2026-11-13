@@ -7,7 +7,6 @@ import {
   applyMigrations,
   backupDatabase,
   MigrationError,
-  resetDatabase,
   type Migration,
   type MigrationOutcome,
 } from './sandbox/appdb.ts';
@@ -123,15 +122,18 @@ export function createExecutor(appsDir: string, limits: Limits): Executor {
       case 'migrate': {
         let connection;
         try {
-          if (job.reset && job.database.endsWith('/live')) {
-            return { ok: false, migration: null, message: 'the published database is never emptied' };
+          // Only a draft's database is ever emptied: said by name, not by exclusion.
+          if (job.reset && !job.database.endsWith('/draft')) {
+            return { ok: false, migration: null, message: 'only a draft database can be emptied' };
           }
           connection = databases.migrator(job.database);
-          if (job.reset) resetDatabase(connection);
-          return { ok: true, ...applyMigrations(connection, job.migrations, limits) };
+          return { ok: true, ...applyMigrations(connection, job.migrations, limits, { reset: job.reset === true }) };
         } catch (error) {
           if (error instanceof MigrationError) return { ok: false, migration: error.migration, message: error.message };
-          return { ok: false, migration: null, message: (error as Error).message };
+          // Not the app's doing (a full disk, a folder that cannot be written): the detail, paths
+          // included, stays in the runner's log.
+          console.error(`migration of ${job.database} failed:`, (error as Error).message);
+          return { ok: false, migration: null, message: 'the database could not be opened or written' };
         } finally {
           connection?.db.close();
         }

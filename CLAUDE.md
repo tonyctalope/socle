@@ -152,10 +152,17 @@ the parent domain. Everything below exists because of that; none of it is option
   strings (the access log in `src/app.ts` drops them).
 - The allowlist (`ALLOWED_EMAILS`) is checked at login and on every use of a session or of an MCP token.
 - **Agents never change what members use.** The builder's tools only touch drafts; there is no tool that
-  publishes, deletes an app or empties published data (`migrate` with `reset` is refused for `*/live` in the
-  runner itself). Publishing is a form of the control plane, admin-only, with the exact-origin check.
+  publishes, deletes an app or empties published data (`migrate` with `reset` only accepts `*/draft`, in the
+  runner itself). Publishing is a form of the control plane, admin-only, with the exact-origin check, and it
+  names the draft version its page showed: a draft built again since is refused, not published in its place.
+- **A draft's files are checked before they are kept** (`checkFiles` in `saveNow`, bounds in the tools' schemas):
+  what is stored in `app_drafts` is read by every page and tool that shows the draft. Every operation on a draft
+  (`saveDraft`, `editDraft`, `publishDraft`, `discardDraft`, `remove`) takes the app's turn (`inTurn`); an edit is
+  merged inside its turn; one save runs, one waits, a third is refused.
 - A draft is another origin with its own database: a draft's code never sees published data, and a session of
-  one address is not a session of the other.
+  one address is not a session of the other. Each address serves its own build files only
+  (`byAssetHash` takes the address). The two share the app's places in the call gate (keyed by slug), the
+  draft holding one at most.
 - Push endpoints are restricted to the browsers' push services (`parseSubscription`) and capped per member and app
   (`MAX_SUBSCRIPTIONS`), so a subscription can neither make the server call arbitrary URLs nor fan out without
   bound.
@@ -229,12 +236,13 @@ endless loops, memory, recursion, forged answers); `runner.test.ts` covers the w
 `apps.test.ts` goes from sources to HTTP with a real runner; `gate.test.ts` the sharing of workers between apps.
 A security rule without a test is not done.
 
-Independent reviews: 2026-11-12 (step 1) and two on 2026-11-13 (step 2). The first one of step 2 was cut short
-after its four most serious findings, all resource exhaustion; the second, a full code review, added sixteen
-(unbounded error answers, a transaction ended by a conflict clause, a trigger on the platform's table, SQLite's
-memory, a job that could not be serialized, and smaller ones). All are fixed and pinned by tests, except two
-left for step 3: the platform database's nightly copy still runs in the web process, and the smoke test starts
-the containers by hand instead of from `compose.yaml`.
+Independent reviews: 2026-11-12 (step 1), two on 2026-11-13 (step 2), one on 2026-11-13 (step 3: drafts, the
+builder, the OAuth server). The last one found 22 things, the most serious being that publishing took the draft
+as it was at the click rather than the one the page showed; all are fixed and pinned by `draft-rules.test.ts`
+and additions to `oauth.test.ts`, `mcp.test.ts` and `drafts.test.ts`. Brief a review as a code review (the rules
+of this file as the specification, findings written to a file as they come, a failing assertion as evidence).
+Not reviewed yet: `src/mcp/app.ts` (per-app endpoints), app removal, `/connections`. Left from earlier reviews:
+the smoke test starts the containers by hand instead of from `compose.yaml`.
 
 ## Roadmap
 
