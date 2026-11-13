@@ -25,7 +25,7 @@ npm run dev          # node --watch, reads .env (see .env.example for the localh
 npm test             # node --test (test/*.test.ts), no network except a fake sign-in provider on 127.0.0.1
 npm run typecheck    # tsc, no emit
 npm run format       # prettier
-scripts/smoke-test.sh <image>   # what CI runs against the built image
+scripts/smoke-test.sh <image>   # what CI runs against the built image: compose.yaml itself, with test names
 ```
 
 Use Node 26 (`engines`); with mise: `mise exec node@26 -- npm test`.
@@ -245,8 +245,7 @@ builder, the OAuth server). The last one found 22 things, the most serious being
 as it was at the click rather than the one the page showed; all are fixed and pinned by `draft-rules.test.ts`
 and additions to `oauth.test.ts`, `mcp.test.ts` and `drafts.test.ts`. Brief a review as a code review (the rules
 of this file as the specification, findings written to a file as they come, a failing assertion as evidence).
-Not reviewed yet: `src/mcp/app.ts` (per-app endpoints), app removal, `/connections`. Left from earlier reviews:
-the smoke test starts the containers by hand instead of from `compose.yaml`.
+Not reviewed yet: `src/mcp/app.ts` (per-app endpoints), app removal, `/connections`.
 
 ## Roadmap
 
@@ -256,5 +255,5 @@ the smoke test starts the containers by hand instead of from `compose.yaml`.
 3. **Done here**: drafts with their own address and database, the builder MCP server and its OAuth server, the
    administration page where a person publishes.
 4. Done: one MCP server per app (functions marked `tool`), removing an app, connected applications, versions
-   and return to an earlier one, access lists, per-app icons. Next: the smoke test started from `compose.yaml`.
+   and return to an earlier one, access lists, per-app icons.
 5. Scheduled functions (`user` is null for those), then files and photos.
