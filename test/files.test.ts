@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { siteOf } from '../src/apps/slug.ts';
@@ -62,7 +62,12 @@ describe('files of an app', () => {
   });
   after(() => ctx.cleanup());
 
-  const upload = (browser: Browser, origin: string, bytes: Uint8Array, pageOrigin = origin) =>
+  const upload = (
+    browser: Browser,
+    origin: string,
+    bytes: Uint8Array | ReadableStream<Uint8Array>,
+    pageOrigin = origin,
+  ) =>
     browser.request(`${origin}/_socle/api/files`, {
       method: 'POST',
       headers: {
@@ -101,13 +106,43 @@ describe('files of an app', () => {
     const shown = await fetchFile(alice, LIVE, photo.id);
     assert.equal(shown.status, 200);
     assert.equal(shown.headers.get('content-type'), 'image/jpeg'); // not the image/png the request claimed
-    assert.equal(shown.headers.get('cache-control'), 'private, max-age=31536000, immutable');
     assert.equal(shown.headers.get('x-content-type-options'), 'nosniff');
     assert.equal(shown.headers.get('content-disposition'), null);
+    assert.equal(shown.headers.get('content-length'), String(JPEG.length));
     assert.deepEqual(new Uint8Array(await shown.arrayBuffer()), JPEG);
+    // Asked about without being fetched: nothing is opened, nothing is sent.
+    const head = await alice.request(`${LIVE}/_socle/files/${photo.id}`, { method: 'HEAD' });
+    assert.equal(head.status, 200);
+    assert.equal(head.headers.get('content-length'), String(JPEG.length));
+    assert.equal((await head.arrayBuffer()).byteLength, 0);
     // A document is handed over as a download, never opened in the app's origin.
     const pdf = await stored(await upload(bob, LIVE, PDF));
     assert.equal((await fetchFile(bob, LIVE, pdf.id)).headers.get('content-disposition'), 'attachment');
+  });
+
+  it('lets a browser keep a file, and show its copy only after asking again', async () => {
+    const photo = await stored(await upload(bob, LIVE, PNG));
+    const shown = await fetchFile(alice, LIVE, photo.id);
+    await shown.arrayBuffer();
+    // Kept, but never shown again without asking: the answer depends on who asks, each time.
+    assert.equal(shown.headers.get('cache-control'), 'private, no-cache');
+    const etag = shown.headers.get('etag')!;
+    assert.equal(etag, `"${photo.id}"`);
+    const again = (browser: Browser) =>
+      browser.request(`${LIVE}/_socle/files/${photo.id}`, { headers: { 'if-none-match': etag } });
+    const unchanged = await again(alice);
+    assert.equal(unchanged.status, 304);
+    assert.equal((await unchanged.arrayBuffer()).byteLength, 0);
+    // The copy a browser holds is of no use to whoever is signed out, or lost access since.
+    assert.equal((await again(new Browser(ctx.app))).status, 401);
+    ctx.deps.apps.setAccess('album', [BOB]);
+    assert.equal((await again(alice)).status, 401);
+    ctx.deps.apps.setAccess('album', null);
+    assert.equal((await again(alice)).status, 304);
+    // A file whose content is gone (a restore without the files) is not there.
+    const lost = await stored(await upload(bob, LIVE, PNG));
+    rmSync(path.join(ctx.deps.config.dataDir, 'files', 'album', lost.id));
+    assert.equal((await fetchFile(bob, LIVE, lost.id)).status, 404);
   });
 
   it('shows a file to nobody else: no session, another app, the app’s other address, a member without access', async () => {
@@ -141,6 +176,58 @@ describe('files of an app', () => {
     assert.equal((await upload(bob, LIVE, JPEG, DRAFT)).status, 403);
     assert.equal((await upload(bob, LIVE, JPEG, DEMO)).status, 403);
     assert.equal((await new Browser(ctx.app).request(`${LIVE}/_socle/api/files`, { method: 'POST' })).status, 401);
+  });
+
+  it('reads nothing a stranger sends, and only a few files at a time', async () => {
+    // A body that never ends and does not say how long it is: measuring it means reading it.
+    let pulled = 0;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1;
+        controller.enqueue(new Uint8Array(64 * 1024));
+      },
+    });
+    const stranger = await upload(new Browser(ctx.app), LIVE, endless);
+    assert.equal(stranger.status, 401);
+    assert.ok(pulled <= 2, `read ${pulled} chunks of a stranger's body`);
+    const elsewhere = await upload(bob, LIVE, endless, DEMO);
+    assert.equal(elsewhere.status, 403);
+    assert.ok(pulled <= 2, `read ${pulled} chunks of another origin's body`);
+
+    // A member's own slow uploads: two are being received, a third waits its turn.
+    const slow = () => {
+      let finish = () => {};
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(JPEG);
+          finish = () => controller.close();
+        },
+      });
+      return { answer: upload(bob, LIVE, body), finish: () => finish() };
+    };
+    const first = slow();
+    const second = slow();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const third = await upload(bob, LIVE, JPEG);
+    assert.equal(third.status, 503);
+    assert.equal(((await third.json()) as { error: string }).error, 'busy');
+    // Another member is not kept out by them.
+    await stored(await upload(alice, LIVE, JPEG));
+    first.finish();
+    second.finish();
+    await stored(await first.answer);
+    await stored(await second.answer);
+    await stored(await upload(bob, LIVE, JPEG));
+    // A file sent without saying its length is measured as it comes.
+    const large = new Uint8Array(FILE_LIMITS.maxBytes + 1);
+    large.set(JPEG);
+    const unannounced = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(large);
+        controller.close();
+      },
+    });
+    assert.equal((await upload(bob, LIVE, unannounced)).status, 413);
   });
 
   it('stops when an app holds as much as it may', async () => {

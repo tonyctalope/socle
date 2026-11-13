@@ -264,7 +264,9 @@ describe('one app, in the administration', () => {
     const save = (files: Record<string, string>, options?: { resetData?: boolean }) =>
       apps().saveDraft('ledger', files, { id: adminId }, options);
     const publishNow = () => apps().publishDraft('ledger', apps().status('ledger')!.draft.versionId);
-    const renamed = tasks('two', { 'migrations/002_rename.sql': 'ALTER TABLE tasks RENAME TO chores;' });
+    const renamed: Record<string, string> = tasks('two', {
+      'migrations/002_rename.sql': 'ALTER TABLE tasks RENAME TO chores;',
+    });
     const { 'migrations/002_rename.sql': _gone, ...without } = renamed;
 
     assert.ok((await save(tasks('one'))).ok);

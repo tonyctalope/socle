@@ -183,13 +183,22 @@ export class Browser {
     this.jar(new URL(origin).host).delete(name);
   }
 
-  async request(url: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}) {
+  async request(
+    url: string,
+    init: { method?: string; headers?: Record<string, string>; body?: string | ReadableStream<Uint8Array> } = {},
+  ) {
     const target = new URL(url);
     const cookies = [...this.jar(target.host)].map(([name, cookie]) => `${name}=${cookie.value}`).join('; ');
     const headers = { ...(cookies ? { cookie: cookies } : {}), ...init.headers };
     const response = this.external.includes(target.origin)
-      ? await fetch(target, { method: init.method, headers, body: init.body, redirect: 'manual' })
-      : await this.app.request(target.href, { method: init.method, headers, body: init.body });
+      ? await fetch(target, { method: init.method, headers, body: init.body as string, redirect: 'manual' })
+      : await this.app.request(target.href, {
+          method: init.method,
+          headers,
+          body: init.body,
+          // A body sent as it comes, without saying how long it will be.
+          ...(init.body instanceof ReadableStream ? { duplex: 'half' } : {}),
+        } as RequestInit);
     for (const header of response.headers.getSetCookie()) {
       this.setCookies.push(header);
       const [pair = '', ...attributes] = header.split(';');
