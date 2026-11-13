@@ -1,3 +1,5 @@
+import { OAUTH_SCHEMA } from '../oauth/schema.ts';
+
 // Append-only: each entry runs once, in order, tracked by PRAGMA user_version.
 // Timestamps are ISO-8601 UTC strings.
 
@@ -128,4 +130,5 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX app_logs_app ON app_logs(app, id);
   `,
+  /* 5 — the authorization server MCP clients sign in with */ OAUTH_SCHEMA,
 ];

@@ -27,6 +27,10 @@ import { CONTROL_CSP, onError, securityHeaders } from '../lib/security.ts';
 import { loadStaticFiles } from '../lib/static.ts';
 import { messagePage, page } from '../pages/layout.ts';
 import { allowlist, isAdmin, type ControlEnv, type Deps } from '../types.ts';
+import { buildBuilderServer } from '../mcp/builder.ts';
+import { builderResource, mcpCors, mcpEndpoint } from '../mcp/http.ts';
+import { protectedResourceMetadata } from '../oauth/metadata.ts';
+import { oauthRoutes } from '../oauth/routes.ts';
 import { adminRoutes } from './admin.ts';
 
 /** Long enough for the way back to an app page (its path, encoded once more). */
@@ -46,7 +50,25 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
   const ssoLimiter = new RateLimiter(120, 60_000);
 
   app.use('*', securityHeaders(config, CONTROL_CSP));
-  app.use('*', bodyLimit({ maxSize: 64 * 1024, onError: (c) => c.text('Request too large', 413) }));
+  // Small bodies everywhere, except the MCP endpoint: an app's files travel through it, and
+  // the MCP handler has its own limit, applied once the bearer token is verified.
+  const smallBody = bodyLimit({ maxSize: 64 * 1024, onError: (c) => c.text('Request too large', 413) });
+  app.use('*', (c, next) => (c.req.path === '/mcp' ? next() : smallBody(c, next)));
+
+  // The builder: the MCP endpoint agents create and change apps through. It is authenticated by
+  // a bearer token of the platform's authorization server, never by a cookie.
+  const builder = builderResource(config);
+  const builderCard = () => ({
+    name: t('Create and change apps'),
+    description: t('It will be able to create apps and change their drafts. It cannot publish: an administrator does.'),
+  });
+  const mcp = mcpEndpoint(deps, builder, (caller) => buildBuilderServer(deps, caller));
+  app.use('/mcp', mcpCors);
+  app.all('/mcp', (c) => mcp(c));
+  app.use('/.well-known/oauth-protected-resource/*', mcpCors);
+  app.get('/.well-known/oauth-protected-resource/mcp', (c) =>
+    c.json(protectedResourceMetadata(config, builder, 'Socle')),
+  );
 
   app.get('/healthz', async (c) => {
     get(db, 'SELECT 1 AS ok');
@@ -237,6 +259,11 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
   }
 
   app.route('/', adminRoutes(deps));
+  // Which MCP endpoints exist, and who may get a token for each: only the builder for now.
+  app.route(
+    '/',
+    oauthRoutes(deps, (resource) => (resource === builder ? builderCard() : null)),
+  );
 
   // Sign-on towards an app host: see src/auth/sso.ts for the whole flow.
   app.get('/sso/start', (c) => {

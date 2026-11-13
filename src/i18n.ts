@@ -65,6 +65,43 @@ const FR: Record<string, string> = {
   'Not published': 'Non publiée',
   'Nothing changed for the members.': 'Rien n’a changé pour les membres.',
 
+  // OAuth (MCP clients)
+  'Authorize access': 'Autoriser l’accès',
+  '{client} wants to use {name}': '{client} souhaite utiliser {name}',
+  'An application': 'Une application',
+  'You are signed in as {email}.': 'Vous êtes connecté en tant que {email}.',
+  'The identity of this application is published by {host}.': 'L’identité de cette application est publiée par {host}.',
+  'The application chose this name itself: nothing verifies it.':
+    'L’application a choisi ce nom elle-même : rien ne le vérifie.',
+  'This application did not give its name.': 'Cette application n’a pas indiqué son nom.',
+  'Your answer is sent to {host}.': 'Votre réponse est envoyée à {host}.',
+  'Your answer is sent to an application on this device ({host}).':
+    'Votre réponse est envoyée à une application de cet appareil ({host}).',
+  'Only allow this if you have just started the connection yourself, from an application on this device.':
+    'N’autorisez que si vous venez de lancer la connexion vous-même, depuis une application de cet appareil.',
+  Allow: 'Autoriser',
+  Deny: 'Refuser',
+  'Back to the application': 'Retour à l’application',
+  'You are being sent back to the application.': 'Vous êtes renvoyé vers l’application.',
+  Continue: 'Continuer',
+  'Too many requests': 'Trop de demandes',
+  'Try again in a few minutes.': 'Réessayez dans quelques minutes.',
+  'Invalid request': 'Demande invalide',
+  'The client_id parameter is missing.': 'Le paramètre client_id est manquant.',
+  'Unknown application': 'Application inconnue',
+  'This application is not recognised ({reason}).': 'Cette application n’est pas reconnue ({reason}).',
+  'Return address refused': 'Adresse de retour refusée',
+  'The return address does not match the application.': 'L’adresse de retour ne correspond pas à l’application.',
+  'Request expired': 'Demande expirée',
+  'Start the connection again from your application.': 'Relancez la connexion depuis votre application.',
+  'Request refused': 'Requête refusée',
+  'Session expired': 'Session expirée',
+  'Sign in again, then start the connection again from your application.':
+    'Reconnectez-vous, puis relancez la connexion depuis votre application.',
+  'Create and change apps': 'Créer et modifier des applis',
+  'It will be able to create apps and change their drafts. It cannot publish: an administrator does.':
+    'Elle pourra créer des applis et modifier leurs brouillons. Elle ne peut pas publier : un administrateur s’en charge.',
+
   // App hosts
   'There is no app at this address.': 'Aucune appli à cette adresse.',
   'You are signed out.': 'Vous êtes déconnecté.',

@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { isValidSlug, parseSite, type Site } from './apps/slug.ts';
 import { isLocale, LOCALES, type Locale } from './i18n.ts';
+import { loadOAuthConfig, type OAuthConfig } from './oauth/config.ts';
 
 export interface Config {
   /** Origin of the control plane (sign-in, SSO), e.g. https://socle.example.com (no trailing slash). */
@@ -31,6 +32,8 @@ export interface Config {
   timezone: string;
   /** Language of the platform's own pages and messages. */
   locale: Locale;
+  /** The authorization server agents (MCP clients) sign in with. */
+  oauth: OAuthConfig;
 }
 
 export class ConfigError extends Error {}
@@ -169,6 +172,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     runnerSocket,
     timezone,
     locale,
+    oauth: loadOAuthConfig(env),
   };
 }
 

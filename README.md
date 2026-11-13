@@ -13,10 +13,9 @@ It is made for a few people who know each other: an allowlist of e-mail addresse
 | ---- | -------------------------------------------------------------------------------------- | ------- |
 | 1    | Sign-in (OpenID Connect), one session per subdomain, PWA and notifications, a demo app | done    |
 | 2    | Apps built without `npm install`, one SQLite database per app, sandboxed functions     | done    |
-| 3    | MCP servers: one to create apps, one per app; drafts, publishing, versions             | next    |
-| 4    | Scheduled functions, files and photos                                                  | planned |
-
-Until step 3 is there, the only app an instance serves is the built-in demo (`DEMO_APP=1`).
+| 3    | Agents create apps over MCP: drafts, an administrator publishes                        | done    |
+| 4    | One MCP server per app (its functions as tools), versions and rollback, access lists   | next    |
+| 5    | Scheduled functions, files and photos                                                  | planned |
 
 ## How it works
 
@@ -96,6 +95,26 @@ change, every open page of the app reloads what it shows. `src/demo/` is a compl
 (`DEMO_APP=1`, served on `demo.<APPS_DOMAIN>`): it checks, on a real phone, sign-in, install, notifications and a
 shared list.
 
+## Creating apps with an agent
+
+The control plane is also an MCP server, at `<CONTROL_URL>/mcp`. Add it as a connector in Claude (or any MCP client
+that signs in with OAuth): the member signs in with their usual account and their agent gets the builder's tools.
+
+| Tool            | What it does                                                                |
+| --------------- | --------------------------------------------------------------------------- |
+| `read_guide`    | The rules for writing an app (files, imports, server functions, UI kit)     |
+| `list_apps`     | Every app, its addresses and where its draft stands                         |
+| `create_app`    | A new app, with a minimal draft that builds                                 |
+| `read_files`    | The files of an app's draft or of its published version                     |
+| `write_files`   | Saves files to the draft and builds it; returns the problems or its address |
+| `call_function` | Runs a server function of the draft, to check it                            |
+| `read_logs`     | What the app's functions printed and how they failed                        |
+
+Everything an agent writes goes to the app's **draft**, served at `https://<app>--draft.<APPS_DOMAIN>` on a
+database of its own: members can try it, and nothing changes in the app they use. There is no tool that publishes
+and none that deletes. An administrator (`ADMIN_EMAILS`) publishes a draft from `<CONTROL_URL>/admin/`, after
+seeing which files it changes; the published database then gets the draft's migrations.
+
 ## Security
 
 The control plane and the apps are sibling subdomains of one domain. For a browser, siblings are one “site”:
@@ -166,6 +185,7 @@ Settings worth knowing:
 | Variable         | Role                                                               | Default |
 | ---------------- | ------------------------------------------------------------------ | ------- |
 | `ALLOWED_EMAILS` | Who can sign in                                                    | —       |
+| `ADMIN_EMAILS`   | Who publishes apps (default: the first allowed address)            | —       |
 | `APP_LOCALE`     | Language of the platform's own pages and messages (`en`, `fr`)     | `en`    |
 | `APP_TIMEZONE`   | Where the members live: what “today” means for the apps            | `UTC`   |
 | `OIDC_NAME`      | What the sign-in button calls the provider (“Sign in with Google”) | —       |
