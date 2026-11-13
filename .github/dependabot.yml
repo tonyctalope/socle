@@ -1,6 +1,10 @@
 # One grouped pull request per ecosystem and per week. Minor and patch updates are
-# merged automatically once CI passes (.github/workflows/dependabot-automerge.yml);
-# security updates arrive as soon as an advisory is published.
+# merged automatically once CI passes (.github/workflows/dependabot-automerge.yml).
+#
+# A version is only proposed once it has been out for a week (`cooldown`): a release that
+# was tampered with is usually noticed and withdrawn within days, and nothing here needs a
+# feature the day it ships. Security updates do not wait: they arrive as soon as an
+# advisory is published.
 version: 2
 updates:
   - package-ecosystem: npm
@@ -9,6 +13,8 @@ updates:
       interval: weekly
       day: monday
       time: '06:00'
+    cooldown:
+      default-days: 7
     groups:
       npm:
         patterns: ['*']
@@ -19,12 +25,16 @@ updates:
       interval: weekly
       day: monday
       time: '06:00'
+    cooldown:
+      default-days: 7
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
       day: monday
       time: '06:00'
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns: ['*']

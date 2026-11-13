@@ -277,6 +277,9 @@ night (`data/backups/` and `data/apps/<app>/backups/`, 14 kept).
 ## Updates
 
 - Dependabot opens one grouped pull request a week; minor and patch updates are merged automatically once CI passes.
+  A version is only proposed once it has been out for seven days, the time a tampered release usually takes to be
+  noticed and withdrawn; security fixes do not wait.
+- Installing the dependencies never runs their install scripts (`.npmrc`), in CI and in the image alike.
 - CI rebuilds the image every night, which also picks up the fixes of the base image.
 - The “Known vulnerabilities” job fails as soon as a production dependency has a high or critical advisory.
 
