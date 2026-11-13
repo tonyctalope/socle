@@ -60,6 +60,11 @@ export const add = mutation({
 - \`fail('message for the person', 'optional_code')\` stops the function; the screen receives the message.
 - \`notify(to, { title, body?, url? })\`: \`to\` is a member id, a list of ids, \`'others'\` or \`'all'\`. Sent once the
   mutation succeeded. \`url\` is a path of the app.
+- \`tool: 'what it does, for an agent'\` (10 to 1000 characters, next to \`input\` and \`handler\`) offers the function
+  to the members' own AI assistants: once the app is published, its tools are served by an MCP endpoint of its own
+  (\`mcp_url\` in \`list_apps\`) that a member connects like this builder. Mark the few functions that make sense
+  in a conversation ("add milk to the list", "what is due this week?"), give each input a \`.describe()\`, and
+  return what an assistant needs to answer. A tool's input is \`v.object({ … })\` or nothing.
 - \`console.log\` lines go to the app's log (\`read_logs\`).
 - A function has a couple of seconds, a bounded memory, and nothing but its database: no network, no files, no
   timers, no state kept between calls. Dates: use \`now\`/\`today\` from the context.

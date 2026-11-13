@@ -14,7 +14,8 @@ It is made for a few people who know each other: an allowlist of e-mail addresse
 | 1    | Sign-in (OpenID Connect), one session per subdomain, PWA and notifications, a demo app | done    |
 | 2    | Apps built without `npm install`, one SQLite database per app, sandboxed functions     | done    |
 | 3    | Agents create apps over MCP: drafts, an administrator publishes                        | done    |
-| 4    | One MCP server per app (its functions as tools), versions and rollback, access lists   | next    |
+| 4    | One MCP server per app (its functions as tools)                                        | done    |
+| 4b   | Versions and rollback, per-app icons and access lists                                  | next    |
 | 5    | Scheduled functions, files and photos                                                  | planned |
 
 ## How it works
@@ -116,6 +117,22 @@ and none that deletes. An administrator (`ADMIN_EMAILS`) publishes a draft from 
 seeing which files it changes; the published database then gets the draft's migrations. The same page removes an app
 (its data is kept aside on the server for a month). Each member sees the applications they connected, and can
 disconnect them, at `<CONTROL_URL>/connections`.
+
+### Using an app from a conversation
+
+An app's author can mark some of its functions as tools:
+
+```ts
+export const add = mutation({
+  tool: 'Adds an item to the shopping list.',
+  input: v.object({ label: v.string().min(1).describe('What to buy') }),
+  handler: ({ db }, { label }) => db.run('INSERT INTO items (label) VALUES (?)', label).lastInsertRowid,
+});
+```
+
+Once published, the app has an MCP endpoint of its own, `https://<app>.<APPS_DOMAIN>/_socle/mcp`, that a member
+adds as a connector: their assistant then acts in the app as they would, with the published version and the
+published data. It shares the control plane's sign-in, and a connection to one app gives nothing on another.
 
 ## Security
 

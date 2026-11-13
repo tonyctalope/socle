@@ -373,6 +373,10 @@ export async function describeBundle(bundle: string, limits: Limits): Promise<Fu
         const problem = schemaProblem(info.input, `${info.name}.input`);
         if (problem) throw new GuestFailure('error', problem);
       }
+      // An agent's tool takes named arguments: its input is an object, or nothing.
+      if (info.tool !== null && info.input !== null && !('type' in info.input && info.input.type === 'object')) {
+        throw new GuestFailure('error', `${info.name}: a function offered as a tool takes v.object({ … }) as input`);
+      }
       if (info.tool !== null && (info.tool.trim().length < 10 || info.tool.length > 1_000)) {
         throw new GuestFailure('error', `${info.name}.tool: the description for Claude must be 10 to 1000 characters`);
       }

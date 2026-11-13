@@ -108,6 +108,8 @@ const FR: Record<string, string> = {
   'Sign in again, then start the connection again from your application.':
     'Reconnectez-vous, puis relancez la connexion depuis votre application.',
   'the app builder': 'l’atelier des applis',
+  'It will be able to use this app in your name: read what it holds and change it.':
+    'Elle pourra utiliser cette appli en votre nom : lire ce qu’elle contient et le modifier.',
   'It will be able to create apps and change their drafts. It cannot publish: an administrator does.':
     'Elle pourra créer des applis et modifier leurs brouillons. Elle ne peut pas publier : un administrateur s’en charge.',
 

@@ -8,6 +8,7 @@ import { starterFiles } from '../apps/template.ts';
 import { displayName, type UserRow } from '../auth/users.ts';
 import { appOrigin } from '../config.ts';
 import type { Deps } from '../types.ts';
+import { appResource, toolsOf } from './app.ts';
 import { GUIDE } from './guide.ts';
 
 // The builder: the tools an agent uses to create and change apps. Everything it does lands
@@ -38,7 +39,14 @@ export function buildBuilderServer(deps: Deps, caller: UserRow): McpServer {
     app: status.slug,
     name: status.name,
     description: status.description,
-    published: status.live ? { url: liveUrl(status.slug), since: status.live.publishedAt } : null,
+    published: status.live
+      ? {
+          url: liveUrl(status.slug),
+          since: status.live.publishedAt,
+          // Where the app's own tools (its functions marked `tool`) are offered, if it has any.
+          mcp_url: toolsOf(deps.apps.live(status.slug)).length > 0 ? appResource(config, status.slug) : null,
+        }
+      : null,
     draft: {
       url: status.draft.versionId ? draftUrl(status.slug) : null,
       builds: status.draft.problems === null,

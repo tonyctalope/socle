@@ -5,6 +5,8 @@ import { siteOf } from '../apps/slug.ts';
 import { appOrigin } from '../config.ts';
 import { translator } from '../i18n.ts';
 import { clientIp, isSameOrigin, RateLimiter } from '../lib/http.ts';
+import { appResource } from '../mcp/app.ts';
+import { revokeResource } from '../oauth/tokens.ts';
 import { messagePage, page } from '../pages/layout.ts';
 import { isAdmin, type ControlEnv, type Deps } from '../types.ts';
 
@@ -157,6 +159,8 @@ export function adminRoutes(deps: Deps): Hono<ControlEnv> {
         console.warn(`[${slug}] removal refused: ${removed.message}`);
         return c.html(messagePage(config.locale, t('Not removed'), t('The app is still there, unchanged.'), back), 409);
       }
+      // An app created later under the same name is another app: nobody stays connected to it.
+      revokeResource(db, appResource(config, slug));
       console.info(`[${slug}] removed by ${c.get('session')!.user.email}`);
       return c.redirect(`/admin/?removed=${encodeURIComponent(status.name)}`, 303);
     }

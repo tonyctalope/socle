@@ -47,7 +47,13 @@ export const mcpCors = cors({
  * Serves one MCP endpoint. `build` makes the server for the member a request's token stands
  * for; it is called for every request, so what a member may do is never older than the request.
  */
-export function mcpEndpoint(deps: Deps, resource: string, build: (caller: UserRow) => McpServer) {
+export function mcpEndpoint(
+  deps: Deps,
+  resource: string,
+  build: (caller: UserRow) => McpServer,
+  /** Asked for every request: false ends it (the member lost the app, or the app its tools). */
+  mayUse: (caller: UserRow) => boolean = () => true,
+) {
   const { db, config } = deps;
   const isAllowed = allowlist(config);
   const gate = requireBearerAuth({
@@ -88,6 +94,9 @@ export function mcpEndpoint(deps: Deps, resource: string, build: (caller: UserRo
         'Retry-After': '60',
       });
     }
+    const userId = auth.extra?.userId;
+    const caller = typeof userId === 'number' ? getUser(db, userId) : undefined;
+    if (!caller || !mayUse(caller)) return c.json({ error: 'forbidden', message: 'Not available to you.' }, 403);
     return handler.fetch(c.req.raw, { authInfo: auth });
   };
 }

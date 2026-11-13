@@ -74,7 +74,9 @@ the sandbox load: `src/kit`, `src/demo`).
 - `src/oauth/` — the authorization server MCP clients sign in with (OAuth 2.1, PKCE, dynamic registration and
   client metadata documents). One server for every MCP endpoint; a token is bound to one resource.
 - `src/mcp/` — `http.ts` (an MCP endpoint behind those tokens), `builder.ts` (the tools that create and change
-  apps, at `<CONTROL_URL>/mcp`), `guide.ts` (what an agent reads before writing an app: keep it exact).
+  apps, at `<CONTROL_URL>/mcp`), `guide.ts` (what an agent reads before writing an app: keep it exact), `app.ts`
+  (an app's own endpoint, `https://<app host>/_socle/mcp`: its functions marked `tool`, run on the published
+  version and data as the member; only exists while the published version offers a tool).
 - `src/control/admin.ts` — `/admin/`: an administrator (`ADMIN_EMAILS`) publishes or discards drafts, and removes
   apps (the runner moves the app's folder to `<APPS_DIR>/.removed/` for a month; database handles notice a
   replaced file, so an app created again under the same name starts empty).
@@ -241,8 +243,7 @@ the containers by hand instead of from `compose.yaml`.
    live updates), the SDK and UI kit, the demo app on that pipeline.
 3. **Done here**: drafts with their own address and database, the builder MCP server and its OAuth server, the
    administration page where a person publishes.
-4. Next: one MCP server per app that offers the functions marked `tool` (their input schemas already come out of
-   the build; resource = `https://<app host>/_socle/mcp`, same authorization server); versions and rollback in the
-   administration page; per-app icons and access lists; the platform database's nightly copy out of the web
-   process; the smoke test started from `compose.yaml`.
+4. Done: one MCP server per app (functions marked `tool`), removing an app, connected applications.
+   Next: versions and rollback in the administration page; per-app icons and access lists; the smoke test
+   started from `compose.yaml`.
 5. Scheduled functions (`user` is null for those), then files and photos.

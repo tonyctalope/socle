@@ -5,12 +5,15 @@ import { serverText } from '../shared/text.ts';
 
 const MAX_ITEMS = 50;
 
-export const list = query(({ db }) =>
-  db.all('SELECT id, label, done, author FROM items ORDER BY done, id DESC LIMIT ?', MAX_ITEMS),
-);
+// `tool` offers a function to the members' AI assistants, at the app's own MCP endpoint.
+export const list = query({
+  tool: 'Lists the items of the shared list of the demo: `done` is 1 once ticked, `author` is the id of the member who added it.',
+  handler: ({ db }) => db.all('SELECT id, label, done, author FROM items ORDER BY done, id DESC LIMIT ?', MAX_ITEMS),
+});
 
 export const add = mutation({
-  input: v.object({ label: v.string().min(1).max(80) }),
+  tool: 'Adds an item to the shared list of the demo. The other members get a notification.',
+  input: v.object({ label: v.string().min(1).max(80).describe('The item to add, 80 characters at most') }),
   handler: ({ db, user, now, notify, locale }, { label }) => {
     const say = serverText(locale);
     const text = label.trim();
