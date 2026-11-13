@@ -50,10 +50,11 @@ export const add = mutation({
 
 - \`query\` reads and cannot write; \`mutation\` runs in one transaction, undone entirely if it throws.
 - Every exported \`query\`/\`mutation\` of \`server/index.ts\` is callable by the screens under its export name.
-- The handler gets \`{ db, user, members, now, today, locale, notify }\` and the input.
+- The handler gets \`{ db, user, members, now, today, time, locale, notify }\` and the input.
   \`user\` and \`members\` are \`{ id: number, name: string }\` (no e-mail address; store \`user.id\` in an INTEGER
   column, and look names up in \`members\` rather than copying them); \`now\` is epoch milliseconds; \`today\` is
-  YYYY-MM-DD in the instance's timezone; \`locale\` is the instance's language ("en", "fr"…).
+  YYYY-MM-DD and \`time\` HH:MM (24 hours) in the instance's timezone; \`locale\` is the instance's language
+  ("en", "fr"…).
 - \`db.all<Row>(sql, ...params)\` → rows, \`db.get<Row>(sql, ...params)\` → first row or null, \`db.run(sql, ...params)\` →
   \`{ changes, lastInsertRowid }\`. Parameters are positional (\`?\`) or one object of named ones (\`:name\`). Always
   use parameters, never build SQL from input.
@@ -80,7 +81,8 @@ export const add = mutation({
   the mutation has succeeded: call it when the row that names the file goes.
 - \`console.log\` lines go to the app's log (\`read_logs\`).
 - A function has a couple of seconds, a bounded memory, and nothing but its database: no network, no files, no
-  timers, no state kept between calls. Dates: use \`now\`/\`today\` from the context.
+  timers, no state kept between calls, no \`Intl\`. Dates: use \`now\`/\`today\`/\`time\` from the context (keep the local
+  day next to a timestamp when you will need it later: a function cannot convert between timezones).
 
 SQL is SQLite. The app sees only its own tables. Not available: PRAGMA, ATTACH, transaction statements,
 temporary tables, virtual tables (no full-text search), \`INSERT OR ROLLBACK\`. Schema changes only in migrations.
@@ -122,7 +124,8 @@ export default function App() {
   made smaller first; \`files.upload(file)\` sends a file as it is (JPEG, PNG, WebP, GIF or PDF, 8 MB at most);
   \`files.url(id)\` is its address, for \`<img src>\` or a link. Files are kept per app and only its members see them.
 - \`useMe()\` → \`{ user, app: { slug, name }, members }\` (ids are numbers); \`logout()\`; \`locale\`; \`words({ en: {…}, fr: {…} })\` picks texts for the
-  instance's language; \`install.standalone()\`; \`usePush()\` / \`push\` for notification settings.
+  instance's language; \`timezone\` (the instance's, e.g. "Europe/Paris": give it as \`timeZone\` when formatting a
+  date, so that every phone shows the day the server counts); \`install.standalone()\`; \`usePush()\` / \`push\` for notification settings.
 
 \`@socle/ui\` (use these first: they follow light and dark mode and feel like the other apps):
 \`Page({ title, back?, actions?, children })\`, \`Card({ title?, children })\`,

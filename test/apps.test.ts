@@ -33,7 +33,7 @@ const groceries = (extra: Record<string, string> = {}) => ({
   'server/index.ts': `
     import { fail, mutation, query, v } from '@socle/server';
     export const list = query(({ db }) => db.all('SELECT id, label, author FROM items ORDER BY id'));
-    export const context = query(({ user, members, now, today }) => ({ user, members, now, today }));
+    export const context = query(({ user, members, now, today, time }) => ({ user, members, now, today, time }));
     export const add = mutation({
       input: v.object({ label: v.string().min(1).max(40) }),
       handler: ({ db, user, notify }, { label }) => {
@@ -161,6 +161,7 @@ describe('an app, from its sources to the browser', () => {
       ],
       now: Date.parse('2027-01-15T23:30:00Z'),
       today: '2027-01-16',
+      time: '00:30',
     });
     ctx.clock.now = new Date();
   });
@@ -674,6 +675,8 @@ describe('an instance set to another language', () => {
       assert.match(page, /<html lang="fr">/);
       assert.match(page, /<title>Démo<\/title>/);
       assert.match(page, /"locale":"fr"/);
+      // …and the zone the server counts days in (this instance did not set one).
+      assert.match(page, /"timezone":"UTC"/);
       // The demo's server functions answer in the language their context names.
       const refused = await bob.fetch(`${DEMO}/_socle/api/fn/add`, {
         method: 'POST',

@@ -5,5 +5,5 @@ export { files, type UploadedFile } from './files.ts';
 export { ApiError } from './http.ts';
 export { install, logout, push, useMe, usePush, type PushState } from './platform.ts';
 export { start } from './start.tsx';
-export { locale, words } from './boot.ts';
+export { locale, timezone, words } from './boot.ts';
 export type { Member } from './boot.ts';

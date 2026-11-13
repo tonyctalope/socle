@@ -321,6 +321,7 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
     members: appMembers(db, c.get('app'), isAllowed),
     push: { publicKey: deps.push.publicKey },
     locale: config.locale,
+    timezone: config.timezone,
     draft: c.get('site').draft,
   });
 

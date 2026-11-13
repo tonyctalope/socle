@@ -1,7 +1,7 @@
 import { appMembers, type AppRow } from '../apps/registry.ts';
 import type { Site } from '../apps/slug.ts';
 import { draftDatabase, liveDatabase, type AppVersion } from '../apps/store.ts';
-import { localDate } from '../config.ts';
+import { localDate, localTime } from '../config.ts';
 import { RateLimiter } from '../lib/http.ts';
 import { RunnerUnavailable } from '../runner/client.ts';
 import type { CallResult, Effect, FunctionInfo } from '../runner/sandbox/call.ts';
@@ -100,6 +100,7 @@ function createCaller(deps: Deps): FunctionCaller {
         members: appMembers(db, app, isAllowed),
         now: deps.now().getTime(),
         today: localDate(config, deps.now()),
+        time: localTime(config, deps.now()),
         locale: config.locale,
       });
     let result: CallResult | 'busy' | 'gone';
