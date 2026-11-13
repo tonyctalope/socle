@@ -10,3 +10,4 @@ scripts
 *.db
 *.md
 !README.md
+docs
