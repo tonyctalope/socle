@@ -67,8 +67,9 @@ services:
       - ./data/apps:/apps
       - ./data/run:/run/socle
     read_only: true
-    # Three call workers, plus one process at a time for a build, a migration or a backup.
-    mem_limit: 1536m
+    # Three call workers, plus one process at a time for a build, a migration or a backup; the
+    # runner kills any of them that grows past 384 MiB.
+    mem_limit: 2g
     pids_limit: 256
     tmpfs:
       - /tmp

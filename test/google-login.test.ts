@@ -165,7 +165,10 @@ describe('Google sign-in (OIDC) and the e-mail allowlist', () => {
 
   it('keeps nothing on the server for a login in progress, so strangers cannot lock members out', async () => {
     const { ctx, browser } = start();
-    const tables = all<{ name: string }>(ctx.deps.db, "SELECT name FROM sqlite_master WHERE type = 'table'");
+    const tables = all<{ name: string }>(
+      ctx.deps.db,
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite~_%' ESCAPE '~'",
+    );
     assert.deepEqual(tables.map((table) => table.name).sort(), [
       'app_versions',
       'apps',

@@ -29,13 +29,20 @@ export interface Limits {
   sqlLength: number;
   valueLength: number;
   dbMaxPages: number;
-  /** What one call may append to the write-ahead log before it is stopped and undone. */
+  /**
+   * How large the write-ahead log of an app may get before the call writing to it is stopped and
+   * undone. With the size of the database, this is what bounds the disk an app can take.
+   */
   walBytes: number;
   /** Tables, indexes, views and triggers of one app, and the total size of their definitions. */
   maxSchemaObjects: number;
   maxSchemaBytes: number;
-  /** Memory SQLite itself may use in one worker process (sorts, temporary tables). */
-  sqliteHeap: number;
+  /**
+   * Resident memory of one worker process; past it the process is killed like a call past its
+   * deadline. This is what bounds SQLite's own memory (sorts, temporary tables), which SQLite
+   * cannot bound itself in Node's build.
+   */
+  workerMemory: number;
   /** Console lines and notifications kept from one call. */
   maxLogs: number;
   maxLogLength: number;
@@ -60,7 +67,7 @@ export const DEFAULT_LIMITS: Limits = {
   walBytes: 128 * MiB,
   maxSchemaObjects: 500,
   maxSchemaBytes: 512 * KiB,
-  sqliteHeap: 64 * MiB,
+  workerMemory: 384 * MiB,
   maxLogs: 50,
   maxLogLength: 2_000,
   maxEffects: 20,

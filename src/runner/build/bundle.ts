@@ -75,7 +75,8 @@ function virtualFiles(files: SourceFiles, scope: BundleScope): Plugin {
         };
       });
       builder.onLoad({ filter: /.*/, namespace: NAMESPACE }, (args) => {
-        const loader = LOADERS[extension(args.path)];
+        const suffix = extension(args.path);
+        const loader = Object.hasOwn(LOADERS, suffix) ? LOADERS[suffix] : undefined;
         if (!loader || !Object.hasOwn(files, args.path)) return { errors: [{ text: `cannot load ${args.path}` }] };
         return { contents: files[args.path], loader, resolveDir: undefined };
       });

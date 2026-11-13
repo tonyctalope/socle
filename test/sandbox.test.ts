@@ -61,11 +61,11 @@ async function app(name: string, source: string, migrations: Record<string, stri
 
 function value(result: CallResult): unknown {
   assert.equal(result.ok, true, result.ok ? '' : `${result.error.code}: ${result.error.message}`);
-  return result.ok ? result.value : undefined;
+  return result.ok ? (JSON.parse(result.json) as unknown) : undefined;
 }
 
 function refused(result: CallResult, code: string | RegExp, message?: RegExp): void {
-  assert.equal(result.ok, false, `expected a refusal, got ${JSON.stringify(result.ok ? result.value : null)}`);
+  assert.equal(result.ok, false, `expected a refusal, got ${result.ok ? result.json : ''}`);
   if (result.ok) return;
   if (typeof code === 'string') assert.equal(result.error.code, code, result.error.message);
   else assert.match(result.error.code, code, result.error.message);
@@ -219,6 +219,22 @@ describe('server functions', () => {
     ]);
   });
 
+  it('refuses a description of the functions that is not one', async () => {
+    // The list is produced by code running next to the app's, which can interfere with it.
+    const forged = (replacement: string) =>
+      bundleServer({
+        'server/index.ts': `
+          import { query } from '@socle/server';
+          const real = WeakMap.prototype.get;
+          WeakMap.prototype.get = function (key) { const found = real.call(this, key); return found && found.handler ? { ...found, ${replacement} } : found; };
+          export const f = query(() => 1);`,
+      });
+    for (const replacement of ["kind: 'admin'", 'kind: null', 'tool: 42', 'tool: { toString() { return "x" } }']) {
+      const built = await forged(replacement);
+      await assert.rejects(describeBundle(built!.code, LIMITS), /query or a mutation|must be text/, replacement);
+    }
+  });
+
   it('collects the notifications a mutation asks for', async () => {
     const notes = await app(
       'notify',
@@ -287,8 +303,44 @@ describe('what an app cannot do with its database', () => {
     `,
     );
     for (const sql of statements)
-      refused(await notes.call('early', { sql }), 'user:sql', /^not allowed: (TRANSACTION|SAVEPOINT) /);
+      refused(
+        await notes.call('early', { sql }),
+        'user:sql',
+        /^(not allowed: (TRANSACTION|SAVEPOINT) |ROLLBACK is not available)/,
+      );
     assert.equal(value(await notes.call('count')), 0, 'no partial write survived');
+  });
+
+  it('cannot end the transaction through a conflict clause either', async () => {
+    const source = `${NOTES}
+      export const viaClause = mutation(({ db }, { sql }) => {
+        db.run("INSERT INTO notes (id, body, author) VALUES (1, 'first', 1)");
+        try { db.run(sql); } catch {}
+        db.run("INSERT INTO notes (id, body, author) VALUES (2, 'after', 1)");
+        throw new Error('boom');
+      });
+      export const thenReturns = mutation(({ db }, { sql }) => {
+        db.run("INSERT INTO notes (id, body, author) VALUES (1, 'first', 1)");
+        try { db.run(sql); } catch {}
+        try { db.run("INSERT INTO notes (id, body, author) VALUES (2, 'after', 1)"); } catch {}
+        return 'done';
+      });
+      export const wipe = mutation(({ db }) => db.run('DELETE FROM notes').changes);
+    `;
+    const notes = await app('conflict', source);
+    for (const sql of [
+      "INSERT OR ROLLBACK INTO notes (id, body, author) VALUES (1, 'again', 1)",
+      "insert or RollBack into notes (id, body, author) values (1, 'again', 1)",
+      'UPDATE OR ROLLBACK notes SET id = 1 WHERE id = 1',
+      "INSERT INTO notes (id, body, author) VALUES (1, 'again', 1) ON CONFLICT (id) DO UPDATE SET body = RAISE(ROLLBACK, 'x')",
+    ]) {
+      refused(await notes.call('viaClause', { sql }), 'error', /boom/);
+      assert.equal(value(await notes.call('count')), 0, `nothing kept after a failed call: ${sql}`);
+      // The clause was refused by name, so nothing was ended: what the function then writes is kept or not as a whole.
+      assert.equal(value(await notes.call('thenReturns', { sql })), 'done');
+      assert.equal(value(await notes.call('count')), 2);
+      await notes.call('wipe');
+    }
   });
 
   it('cannot change the schema or the settings outside migrations', async () => {
@@ -354,6 +406,13 @@ describe('what an app cannot do with its database', () => {
       ['SELECT * FROM victim.notes'],
       ['SELECT * FROM other.notes'],
       ['SELECT * FROM temp.sqlite_master'],
+      // Tables SQLite has built in, without anyone creating them: storage internals, tokenizers.
+      ['SELECT name, pageno FROM dbstat'],
+      ["SELECT token FROM fts3tokenize WHERE input = 'hello world'"],
+      ['SELECT * FROM sqlite_dbpage'],
+      ['SELECT * FROM generate_series(1, 3)'],
+      ['SELECT COUNT(*) FROM dbstat'],
+      ['WITH pages AS (SELECT * FROM dbstat) SELECT COUNT(*) FROM pages'],
       ['SELECT * FROM _socle_migrations'],
       ["INSERT INTO _socle_migrations VALUES ('x', 'y', 'z')"],
       ['DELETE FROM _socle_migrations'],
@@ -365,6 +424,11 @@ describe('what an app cannot do with its database', () => {
     assert.deepEqual(readdirSync(path.join(dir, 'thief')).sort(), ['live.db', 'live.db-shm', 'live.db-wal']);
     assert.deepEqual(value(await victim.call('list')), [{ id: 1, body: 'secret de victim', author: 1 }]);
     assert.deepEqual(value(await thief.call('list')), []);
+    // What stays readable besides the app's own tables: its schema, and JSON unfolded as rows.
+    assert.deepEqual(value(await thief.call('attempt', { sql: "SELECT value FROM json_each('[1,2]')" })), [
+      { value: 1 },
+      { value: 2 },
+    ]);
   });
 
   it('cannot read without bound', async () => {
@@ -379,6 +443,7 @@ describe('what an app cannot do with its database', () => {
       export const huge = query(({ db }) => db.get('SELECT zeroblob(100000000) AS z'));
       export const blob = query(({ db }) => db.get('SELECT randomblob(8) AS z'));
       export const big = query(() => 'x'.repeat(30000));
+      export const longNames = query(({ db }) => db.all('SELECT x AS ' + 'n'.repeat(2000) + ' FROM (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 50) SELECT x FROM c)').length);
     `,
     );
     const call = (fn: string, input?: unknown) => notes.call(fn, input, {}, limits);
@@ -389,6 +454,7 @@ describe('what an app cannot do with its database', () => {
     refused(await call('huge'), 'error', /too big/);
     refused(await call('blob'), 'error', /BLOB/);
     refused(await call('big'), 'result_too_large');
+    refused(await call('longNames'), 'error', /too much data/); // 50 rows × a 2000-character column name
   });
 
   it('cannot fill the disk: an app database has a maximum size', async () => {
@@ -558,23 +624,34 @@ describe('what an app cannot do with the machine', () => {
     assert.equal(value(await shifty.call('writer', null, { kind: 'mutation' })), 1);
   });
 
-  it('cannot fill the disk by rewriting the same rows in one call', async () => {
+  it('cannot take more disk for its log than it is allowed', async () => {
     const limits = { ...LIMITS, callMs: 5_000, walBytes: 2 * 1024 * 1024 };
+    // A table of about 6 MiB, filled by a migration.
     const notes = await app(
       'churn',
       `
-      export const seed = mutation(({ db }) => { for (let i = 0; i < 200; i++) db.run("INSERT INTO notes (body, author) VALUES (printf('%.*c', 3000, 'x'), 1)"); });
-      export const churn = mutation(({ db }) => {
-        let passes = 0;
-        for (;;) { try { db.run('UPDATE notes SET author = author + 1'); passes++; } catch (error) { if (passes > 1000) throw error; passes += 1000; } }
-      });
+      export const rewrite = mutation(({ db }) => db.run('UPDATE notes SET author = author + 1').changes);
+      export const stubborn = mutation(({ db }) => { for (;;) { try { db.run('UPDATE notes SET author = author + 1'); } catch {} } });
+      export const quietly = mutation(({ db }) => db.all('UPDATE notes SET author = author + 1 RETURNING id').length);
+      export const small = mutation(({ db }) => db.run('UPDATE notes SET author = author + 1 WHERE id <= 10').changes);
       export const sum = query(({ db }) => db.get('SELECT SUM(author) AS total, COUNT(*) AS n FROM notes'));
     `,
+      {
+        '001_init.sql': `${SCHEMA}
+          INSERT INTO notes (body, author)
+            SELECT printf('%.*c', 3000, 'x'), 1
+            FROM (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 1500) SELECT x FROM c);`,
+      },
     );
-    assert.equal((await notes.call('seed', null, {}, limits)).ok, true);
-    refused(await notes.call('churn', null, {}, limits), /^(error|timeout)$/);
-    assert.deepEqual(value(await notes.call('sum')), { total: 200, n: 200 }, 'nothing of it was kept');
-    assert.ok(statSync(path.join(dir, 'churn', 'live.db-wal')).size < 1024 * 1024, 'and the log gave its space back');
+    const log = path.join(dir, 'churn', 'live.db-wal');
+    for (const fn of ['rewrite', 'quietly']) {
+      refused(await notes.call(fn, null, {}, limits), 'error', /wrote too much data/);
+      assert.ok(statSync(log).size < 1024 * 1024, `${fn}: the log gave its space back`);
+    }
+    // Catching the refusal does not help: the call gets no further statement, and is undone.
+    refused(await notes.call('stubborn', null, {}, limits), /^(error|timeout)$/);
+    assert.deepEqual(value(await notes.call('sum')), { total: 1500, n: 1500 }, 'nothing of it was kept');
+    assert.equal(value(await notes.call('small', null, {}, limits)), 10);
   });
 
   it('is stopped when it recurses too deeply, in code or in data', async () => {
@@ -637,6 +714,54 @@ describe('what an app cannot do with the machine', () => {
       (await describeBundle(notes.bundle, LIMITS)).map((fn) => fn.name),
       ['add', 'again', 'count', 'list'],
     );
+  });
+
+  it('gets an answer of bounded size when it fails, whatever it throws', async () => {
+    const notes = await app(
+      'loud',
+      `
+      export const longMessage = query(() => fail('x'.repeat(5_000_000)));
+      export const longCode = query(() => fail('Non.', 'c'.repeat(1_000_000)));
+      export const oddCode = query(() => fail('Non.', 'a b"<c>'));
+      export const longError = query(() => { throw new Error('y'.repeat(5_000_000)); });
+      export const longName = query(() => { const e = new Error('z'); e.name = 'N'.repeat(1_000_000); throw e; });
+      export const longText = query(() => { throw 't'.repeat(5_000_000); });
+      export const longField = mutation({ input: v.object({ a: v.int() }), handler: () => 1 });
+      export const getter = query(() => { throw { get message() { return 'g'.repeat(5_000_000); }, name: 'UserError' }; });
+    `,
+    );
+    const cases: [string, unknown?][] = [
+      ['longMessage'],
+      ['longCode'],
+      ['longError'],
+      ['longName'],
+      ['longText'],
+      ['getter'],
+      ['longField', { ['k'.repeat(100_000)]: 1 }],
+    ];
+    for (const [fn, input] of cases) {
+      const result = await notes.call(fn, input ?? null);
+      assert.ok(!result.ok);
+      assert.ok(result.error.message.length <= 2_100, `${fn}: message of ${result.error.message.length} characters`);
+      assert.ok(result.error.code.length <= 50, `${fn}: code of ${result.error.code.length} characters`);
+    }
+    refused(await notes.call('longCode'), 'user:failed', /^Non\.$/);
+    refused(await notes.call('oddCode'), 'user:failed');
+    refused(await notes.call('longMessage'), 'user:failed', /^x{2000}…$/);
+  });
+
+  it('is told why its changes could not be saved', async () => {
+    const strict = await app(
+      'deferred',
+      `export const orphan = mutation(({ db }) => db.run('INSERT INTO children (parent) VALUES (99)').changes);
+       export const count = query(({ db }) => db.get('SELECT COUNT(*) AS n FROM children').n);`,
+      {
+        '001.sql': `CREATE TABLE parents (id INTEGER PRIMARY KEY);
+          CREATE TABLE children (id INTEGER PRIMARY KEY, parent INTEGER REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED);`,
+      },
+    );
+    refused(await strict.call('orphan'), 'error', /could not be saved: FOREIGN KEY constraint failed/);
+    assert.equal(value(await strict.call('count')), 0);
   });
 
   it('cannot forge what the platform reads back', async () => {
@@ -770,6 +895,15 @@ describe('migrations', () => {
       'COMMIT; CREATE TABLE after_commit (x)',
       'CREATE TEMP TABLE t (x)',
       'CREATE TABLE _socle_mine (x)',
+      'CREATE TABLE mine (x); ALTER TABLE mine RENAME TO _socle_state',
+      'CREATE TABLE mine (x); CREATE TRIGGER t AFTER INSERT ON _socle_migrations BEGIN DELETE FROM mine; END',
+      'CREATE TABLE mine (x); CREATE TRIGGER t BEFORE INSERT ON _socle_migrations BEGIN SELECT RAISE(IGNORE); END',
+      'CREATE TABLE mine (x); CREATE TRIGGER _socle_t AFTER INSERT ON mine BEGIN DELETE FROM mine; END',
+      'CREATE INDEX i ON _socle_migrations (name)',
+      'CREATE VIEW _socle_view AS SELECT 1 AS x',
+      'CREATE TABLE mine (id INTEGER PRIMARY KEY); INSERT INTO mine VALUES (1); INSERT OR ROLLBACK INTO mine VALUES (1)',
+      'CREATE TABLE mine (id INTEGER PRIMARY KEY); CREATE TRIGGER t AFTER INSERT ON mine BEGIN SELECT RAISE(ROLLBACK, 1); END',
+      'SELECT * FROM dbstat',
       'DROP TABLE _socle_migrations',
       "INSERT INTO _socle_migrations VALUES ('000.sql', 'x', 'y')",
       'CREATE TABLE sqlite_mine (x)',

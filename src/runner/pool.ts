@@ -1,4 +1,5 @@
 import { fork, type ChildProcess } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { isOneShot, timeoutOf, type Job, type JobResult } from './jobs.ts';
 import type { Limits } from './limits.ts';
@@ -13,7 +14,7 @@ import type { Limits } from './limits.ts';
 // and backups each get a process of their own, one at a time, gone afterwards.
 
 export class PoolFailure extends Error {
-  readonly code: 'timeout' | 'crashed' | 'busy' | 'closed';
+  readonly code: 'timeout' | 'memory' | 'crashed' | 'busy' | 'closed';
   constructor(code: PoolFailure['code'], message: string) {
     super(message);
     this.code = code;
@@ -46,6 +47,19 @@ export interface PoolOptions {
 }
 
 const WORKER = fileURLToPath(new URL('./worker.ts', import.meta.url));
+/** How often the memory of working processes is looked at. */
+const WATCH_MS = 100;
+
+/** Resident memory of a process in bytes, or 0 where it cannot be read (not Linux, process gone). */
+function residentMemory(pid: number | undefined): number {
+  if (!pid) return 0;
+  try {
+    const found = /^VmRSS:\s+(\d+) kB$/m.exec(readFileSync(`/proc/${pid}/status`, 'utf8'));
+    return found ? Number(found[1]) * 1024 : 0;
+  } catch {
+    return 0;
+  }
+}
 /** How long a process may take to start before it is given up on. */
 const START_MS = 20_000;
 
@@ -57,8 +71,9 @@ export class WorkerPool {
   private oneShot: Worker | null = null;
   private nextId = 1;
   private closed = false;
-  /** Processes killed because a job outlived its deadline (for tests and /health). */
+  /** Processes killed because a job outlived its deadline or its memory (for tests and /health). */
   killed = 0;
+  private watch: NodeJS.Timeout | undefined;
 
   constructor(options: PoolOptions) {
     this.options = {
@@ -96,6 +111,8 @@ export class WorkerPool {
 
   async close(): Promise<void> {
     this.closed = true;
+    clearInterval(this.watch);
+    this.watch = undefined;
     const gone = new PoolFailure('closed', 'the runner is shutting down');
     for (const pending of [...this.queue.splice(0), ...this.oneShotQueue.splice(0)]) pending.reject(gone);
     const all = [...this.workers.splice(0), ...(this.oneShot ? [this.oneShot] : [])];
@@ -202,9 +219,47 @@ export class WorkerPool {
       timeoutOf(pending.job, limits) + limits.killGraceMs,
     );
     worker.current = { ...pending, id, timer };
-    worker.child.send({ id, job: pending.job }, (error) => {
-      if (error) this.retire(worker, new PoolFailure('crashed', 'the runner lost a worker'));
-    });
+    this.watchMemory();
+    try {
+      worker.child.send({ id, job: pending.job }, (error) => {
+        if (error) this.retire(worker, new PoolFailure('crashed', 'the runner lost a worker'));
+      });
+    } catch {
+      // The job could not even be put on the wire. The worker did nothing wrong and stays;
+      // only this job fails. (This runs inside event handlers: nothing may be thrown from here.)
+      clearTimeout(timer);
+      worker.current = null;
+      pending.reject(new PoolFailure('crashed', 'this job could not be sent to a worker'));
+      if (worker.once) {
+        worker.child.kill('SIGKILL');
+        this.retire(worker, new PoolFailure('crashed', 'the runner stopped while doing this'));
+      }
+    }
+  }
+
+  /**
+   * Time is bounded by a timer per job; memory by looking at each working process a few times a
+   * second and killing the one that grew past its allowance. The sandbox bounds what the app's
+   * JavaScript holds; this bounds everything else a job makes its process hold (SQLite's own
+   * memory, above all), which nothing inside the process can.
+   */
+  private watchMemory(): void {
+    if (this.watch) return;
+    this.watch = setInterval(() => {
+      const working = [...this.workers, ...(this.oneShot ? [this.oneShot] : [])].filter((worker) => worker.current);
+      if (working.length === 0) {
+        clearInterval(this.watch);
+        this.watch = undefined;
+        return;
+      }
+      for (const worker of working) {
+        if (residentMemory(worker.child.pid) <= this.options.limits.workerMemory) continue;
+        this.killed += 1;
+        worker.child.kill('SIGKILL');
+        this.retire(worker, new PoolFailure('memory', 'this used too much memory and was stopped'));
+      }
+    }, WATCH_MS);
+    this.watch.unref();
   }
 
   private assign(worker: Worker): void {

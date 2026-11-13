@@ -6,6 +6,7 @@ import { after, describe, it } from 'node:test';
 import { localRunner, remoteRunner, RunnerUnavailable, type Runner } from '../src/runner/client.ts';
 import { DEFAULT_LIMITS, type Limits } from '../src/runner/limits.ts';
 import { WorkerPool, PoolFailure } from '../src/runner/pool.ts';
+import type { CallResult } from '../src/runner/sandbox/call.ts';
 import { startRunner } from '../src/runner/supervisor.ts';
 
 // The runner as the web process sees it: jobs go to worker processes, and a job that
@@ -28,6 +29,10 @@ const SOURCE = {
       handler: ({ db }, { body }) => db.run('INSERT INTO notes (body) VALUES (?)', body).lastInsertRowid,
     });
     const FOREVER = 'WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT COUNT(*) AS n FROM c';
+    // A few hundred megabytes held by SQLite itself, outside the sandbox's own memory.
+    const HEAVY = \`WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 400),
+      m AS MATERIALIZED (SELECT randomblob(1000000) AS b FROM c) SELECT COUNT(*) AS n, SUM(LENGTH(b)) AS bytes FROM m\`;
+    export const heavySql = query(({ db }) => db.get(HEAVY));
     export const endlessSql = query(({ db }) => db.get(FOREVER));
     export const endlessWrite = mutation(({ db }) => {
       db.run("INSERT INTO notes (body) VALUES ('ghost')");
@@ -38,6 +43,11 @@ const SOURCE = {
     export const spin = query(() => { for (;;) {} });
   `,
 };
+
+function valueOf(result: CallResult): unknown {
+  assert.ok(result.ok, JSON.stringify(result));
+  return JSON.parse(result.json);
+}
 
 async function deploy(runner: Runner, app: string) {
   const built = await runner.build(SOURCE);
@@ -51,7 +61,7 @@ async function deploy(runner: Runner, app: string) {
       database,
       bundleHash,
       fn,
-      input,
+      inputJson: JSON.stringify(input),
       user: TONY,
       members: [TONY],
       now: Date.now(),
@@ -71,11 +81,11 @@ describe('the runner, as the web process uses it', () => {
     assert.deepEqual(await notes.call('add', { body: 'Pain' }), {
       ok: true,
       kind: 'mutation',
-      value: 1,
+      json: '1',
       effects: [],
       logs: [],
     });
-    assert.deepEqual(await notes.call('count'), { ok: true, kind: 'query', value: 1, effects: [], logs: [] });
+    assert.deepEqual(await notes.call('count'), { ok: true, kind: 'query', json: '1', effects: [], logs: [] });
     const refused = await notes.call('add', {});
     assert.ok(!refused.ok && refused.error.code === 'invalid_input');
   });
@@ -103,8 +113,30 @@ describe('the runner, as the web process uses it', () => {
       assert.ok(elapsed < LIMITS.callMs + LIMITS.killGraceMs + 1_500, `${fn} was stopped after ${elapsed} ms`);
     }
     // The interrupted write left nothing, and the app works again at once.
-    assert.equal(((await notes.call('count')) as { value: unknown }).value, 1);
-    assert.equal(((await notes.call('add', { body: 'après' })) as { value: unknown }).value, 2);
+    assert.equal(valueOf(await notes.call('count')), 1);
+    assert.equal(valueOf(await notes.call('add', { body: 'après' })), 2);
+  });
+
+  it('kills a worker whose memory grows past its allowance, whatever is holding it', async () => {
+    const tight = localRunner({
+      appsDir: path.join(dir, 'tight'),
+      limits: { ...LIMITS, callMs: 5_000, workerMemory: 220 * 1024 * 1024 },
+      workers: 1,
+    });
+    try {
+      const notes = await deploy(tight, 'heavy');
+      const result = await notes.call('heavySql');
+      if (process.platform === 'linux') {
+        assert.deepEqual(result, {
+          ok: false,
+          error: { code: 'memory', message: 'the function used too much memory and was stopped' },
+          logs: [],
+        });
+      }
+      assert.equal(valueOf(await notes.call('count')), 0, 'and the app works again at once');
+    } finally {
+      await tight.close();
+    }
   });
 
   it('one stuck app does not block the others', async () => {
@@ -127,7 +159,7 @@ describe('the runner, as the web process uses it', () => {
       );
       assert.ok(answers.every((answer) => answer.ok));
       assert.equal(stopped, false, 'the other worker served them while the first was still stuck');
-      assert.equal(((await fine.call('count')) as { value: unknown }).value, 5);
+      assert.equal(valueOf(await fine.call('count')), 5);
       assert.equal((await blocked).ok, false);
     } finally {
       await patient.close();
@@ -139,7 +171,16 @@ describe('the worker pool', () => {
   // A call the runner answers at once: it does not know that code.
   const quick = (database = 'nobody/live') => ({
     type: 'call' as const,
-    request: { database, bundleHash: '0'.repeat(64), fn: 'x', input: null, user: null, members: [], now: 0, today: '' },
+    request: {
+      database,
+      bundleHash: '0'.repeat(64),
+      fn: 'x',
+      inputJson: 'null',
+      user: null,
+      members: [],
+      now: 0,
+      today: '',
+    },
   });
 
   it('refuses new jobs when too many are waiting, and when closed', async () => {
@@ -177,7 +218,7 @@ describe('the worker pool', () => {
             database: 'respawn/live',
             bundleHash: hash,
             fn,
-            input: null,
+            inputJson: 'null',
             user: null,
             members: [],
             now: 0,
@@ -186,8 +227,30 @@ describe('the worker pool', () => {
         });
       await assert.rejects(call('endlessSql'), (error) => error instanceof PoolFailure && error.code === 'timeout');
       assert.deepEqual(pool.stats(), { workers: 0, busy: 0, queued: 0, killed: 1 });
-      assert.deepEqual(await call('count'), { ok: true, kind: 'query', value: 0, effects: [], logs: [] });
+      assert.deepEqual(await call('count'), { ok: true, kind: 'query', json: '0', effects: [], logs: [] });
       assert.equal(pool.stats().workers, 1);
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it('fails only the job that cannot be sent to a worker', async () => {
+    const pool = new WorkerPool({ appsDir: path.join(dir, 'unsendable'), limits: LIMITS, size: 1 });
+    try {
+      assert.ok('error' in (await pool.run(quick())));
+      // A value that cannot be written as JSON: nothing the web side sends, but nothing here may depend on that.
+      const unsendable = { ...quick(), request: { ...quick().request, now: 10n as unknown as number } };
+      const outcomes = await Promise.all(
+        [quick(), unsendable, quick(), unsendable, quick()].map((job) =>
+          pool.run(job).then(
+            () => 'answered',
+            (error: PoolFailure) => `${error.code}: ${error.message}`,
+          ),
+        ),
+      );
+      const unsent = 'crashed: this job could not be sent to a worker';
+      assert.deepEqual(outcomes, ['answered', unsent, 'answered', unsent, 'answered']);
+      assert.deepEqual(pool.stats(), { workers: 1, busy: 0, queued: 0, killed: 0 });
     } finally {
       await pool.close();
     }
@@ -239,7 +302,7 @@ describe('the runner behind its socket', () => {
       assert.equal(statSync(socketPath).mode & 0o777, 0o600);
       assert.equal(await runner.healthy(), true);
       const notes = await deploy(runner, 'remote');
-      assert.equal(((await notes.call('add', { body: 'Pain' })) as { value: unknown }).value, 1);
+      assert.equal(valueOf(await notes.call('add', { body: 'Pain' })), 1);
       const stopped = await notes.call('spin');
       assert.ok(!stopped.ok && stopped.error.code === 'timeout');
       const vendor = await runner.vendor();

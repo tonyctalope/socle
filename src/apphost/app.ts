@@ -327,6 +327,13 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
     if (body.query === true && info.kind !== 'query') {
       return problem(c, 400, 'not_a_query', `${info.name} modifie des données : appelle-la avec api.${info.name}().`);
     }
+    // From here to the function the input travels as text.
+    let inputJson: string;
+    try {
+      inputJson = JSON.stringify(body.input ?? null);
+    } catch {
+      return problem(c, 400, 'invalid_input', 'input: nested too deeply');
+    }
     const caller = self(c);
     const { bundleHash } = version;
     const send = () =>
@@ -335,7 +342,7 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
         bundleHash,
         fn: info.name,
         kind: info.kind,
-        input: body.input ?? null,
+        inputJson,
         user: caller,
         members: appMembers(db, row, isAllowed),
         now: deps.now().getTime(),
@@ -366,11 +373,14 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
       deps.live.publish(row.slug, 'change', { client: /^[a-z0-9]{1,40}$/.test(client) ? client : '' });
       notify(row, caller.id, result.effects);
     }
-    return c.json({ kind: result.kind, value: result.value });
+    // The result is already JSON text, checked by the runner: it is passed on, not rebuilt.
+    return c.body(`{"kind":"${result.kind}","value":${result.json}}`, 200, { 'Content-Type': 'application/json' });
   });
 
   // Live updates: one long-lived stream per open page (see live.ts).
   app.get('/_socle/api/events', (c) => {
+    // HEAD is routed here too: it would open a stream that nobody reads or closes.
+    if (c.req.method !== 'GET') return c.body(null, 405, { Allow: 'GET' });
     const session = c.get('session')!;
     const { slug } = c.get('app');
     const encoder = new TextEncoder();
@@ -419,12 +429,11 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
         release();
       },
     });
-    return new Response(stream, {
-      headers: {
-        'Content-Type': 'text/event-stream; charset=utf-8',
-        'Cache-Control': 'no-store',
-        'X-Accel-Buffering': 'no',
-      },
+    // Through the context, so that what earlier middleware prepared (a renewed session cookie) is sent.
+    return c.body(stream, 200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Accel-Buffering': 'no',
     });
   });
 

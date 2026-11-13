@@ -43,7 +43,7 @@ function pathProblem(file: string): string | null {
   if (file.length > SOURCE_LIMITS.maxPathLength) return 'path too long';
   const segments = file.split('/');
   const folder = segments[0] ?? '';
-  const allowed = EXTENSIONS[folder];
+  const allowed = Object.hasOwn(EXTENSIONS, folder) ? EXTENSIONS[folder] : undefined;
   if (!allowed || segments.length < 2)
     return `files go in ${FOLDERS.map((name) => `${name}/`).join(', ')} or are app.json`;
   if (!segments.every((segment) => SEGMENT.test(segment))) {

@@ -49,7 +49,8 @@ expect "unknown app" 404 "$(status "${resolve[@]/demo/ghost}" "http://ghost.apps
 # What the runner container is: no network, no secret, no platform database.
 expect "the runner has no network interface but loopback" lo "$(docker exec "$runner" ls /sys/class/net | tr '\n' ' ' | xargs)"
 expect "the runner knows no secret" 0 "$(docker exec "$runner" env | grep -ciE 'google|vapid|allowed|secret' || true)"
-expect "the runner does not see the platform database" 0 "$(docker exec "$runner" sh -c "find / -xdev -name 'socle.db*' 2>/dev/null | wc -l")"
+expect "the web container's database exists" 1 "$(docker exec "$web" sh -c "ls /data/socle.db | wc -l")"
+expect "the runner does not see the platform database" 0 "$(docker exec "$runner" sh -c "find / \\( -path /proc -o -path /sys -o -path /dev \\) -prune -o -name 'socle.db*' -print 2>/dev/null | wc -l")"
 expect "the demo app has its own database" 1 "$(docker exec "$runner" sh -c 'ls /apps/demo/live.db | wc -l')"
 docker logs "$web" 2>&1 | tail -5
 docker logs "$runner" 2>&1 | tail -3

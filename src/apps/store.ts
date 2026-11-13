@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import type { UserRow } from '../auth/users.ts';
-import { get, run, transaction, type Db } from '../db/database.ts';
+import { all, get, run, transaction, type Db } from '../db/database.ts';
 import type { BuiltApp } from '../runner/build/build.ts';
 import type { BuildProblem } from '../runner/build/files.ts';
-import type { Runner } from '../runner/client.ts';
+import { RunnerUnavailable, type Runner } from '../runner/client.ts';
 import type { FunctionInfo } from '../runner/sandbox/call.ts';
 import { isValidSlug } from './slug.ts';
 
@@ -52,6 +52,11 @@ export function sourceHash(files: Record<string, string>): string {
 }
 
 const assetHash = (web: { js: string; css: string }) => sha256(`${web.js}\0${web.css}`).slice(0, 16);
+
+/** Versions kept per app: the published one, and enough before it to come back to. */
+const KEPT_VERSIONS = 20;
+/** The colors of an app that names none (the platform's own background). */
+const DEFAULT_COLOR = '#f4f1ea';
 
 /** Memory the cache of built versions may hold (their screens and stylesheets). */
 const CACHE_BYTES = 48 * 1024 * 1024;
@@ -147,14 +152,12 @@ export class AppStore {
          ON CONFLICT(slug) DO UPDATE SET name = excluded.name, description = excluded.description`,
         { slug, name: manifest.name, description: manifest.description, now },
       );
-      if (manifest.themeColor)
-        run(this.db, 'UPDATE apps SET theme_color = :color WHERE slug = :slug', { slug, color: manifest.themeColor });
-      if (manifest.backgroundColor) {
-        run(this.db, 'UPDATE apps SET background_color = :color WHERE slug = :slug', {
-          slug,
-          color: manifest.backgroundColor,
-        });
-      }
+      // A version that names no color gets the platform's, not the previous version's.
+      run(this.db, 'UPDATE apps SET theme_color = :theme, background_color = :background WHERE slug = :slug', {
+        slug,
+        theme: manifest.themeColor ?? DEFAULT_COLOR,
+        background: manifest.backgroundColor ?? DEFAULT_COLOR,
+      });
       const { lastInsertRowid } = run(
         this.db,
         `INSERT INTO app_versions (app, created_at, created_by, source_hash, asset_hash, files, manifest, web_js, web_css,
@@ -177,10 +180,28 @@ export class AppStore {
         },
       );
       run(this.db, 'UPDATE apps SET live_version = :id WHERE slug = :slug', { id: lastInsertRowid, slug });
+      // A version holds the sources and everything built from them: only the last few are kept.
+      const old = all<{ id: number }>(
+        this.db,
+        `SELECT id FROM app_versions WHERE app = :slug AND id NOT IN (
+           SELECT id FROM app_versions WHERE app = :slug ORDER BY id DESC LIMIT ${KEPT_VERSIONS})`,
+        { slug },
+      );
+      for (const row of old) {
+        run(this.db, 'DELETE FROM app_versions WHERE id = :id', { id: row.id });
+        this.forget(row.id);
+      }
       return lastInsertRowid;
     });
     this.onPublish(slug);
     return id;
+  }
+
+  private forget(id: number): void {
+    const cached = this.cache.get(id);
+    if (!cached) return;
+    this.cache.delete(id);
+    this.cachedBytes -= cached.js.length + cached.css.length;
   }
 
   /**
@@ -207,12 +228,40 @@ export class AppStore {
     files: Record<string, string>,
     createdBy: Pick<UserRow, 'id'> | null,
   ): Promise<DeployOutcome> {
-    if (!isValidSlug(slug))
+    if (!isValidSlug(slug)) {
       return { ok: false, stage: 'build', problems: [{ message: `"${slug}" is not a valid app name` }] };
-    const outcome = await this.runner.build(files);
+    }
+    // A build or a migration stopped at its deadline is an outcome of this deployment like
+    // any other problem; only a runner that is not there at all is an exception.
+    const stopped = (stage: 'build' | 'migrate', error: unknown): DeployOutcome => {
+      if (!(error instanceof RunnerUnavailable) || !['timeout', 'memory', 'crashed'].includes(error.code)) throw error;
+      const what = stage === 'build' ? 'the build' : 'the migrations';
+      const why =
+        error.code === 'timeout' ? 'took too long' : error.code === 'memory' ? 'used too much memory' : 'failed';
+      return {
+        ok: false,
+        stage,
+        problems: [{ message: `${what} ${why} and ${stage === 'build' ? 'was' : 'were'} stopped` }],
+      };
+    };
+
+    let outcome;
+    try {
+      outcome = await this.runner.build(files);
+    } catch (error) {
+      return stopped('build', error);
+    }
     if (!outcome.ok) return { ok: false, stage: 'build', problems: outcome.problems };
     const built = outcome.app;
-    const migrated = await this.runner.migrate(liveDatabase(slug), built.migrations);
+    // The runner keeps the server code itself; calls then name it by its hash. Given before the
+    // database changes: if this fails, nothing has happened yet.
+    if (built.server) await this.runner.install(slug, built.server.bundle);
+    let migrated;
+    try {
+      migrated = await this.runner.migrate(liveDatabase(slug), built.migrations);
+    } catch (error) {
+      return stopped('migrate', error);
+    }
     if (!migrated.ok) {
       const file = migrated.migration ? `migrations/${migrated.migration}` : undefined;
       return { ok: false, stage: 'migrate', problems: [{ file, message: migrated.message }] };
@@ -222,11 +271,11 @@ export class AppStore {
       id: number;
       source_hash: string;
       asset_hash: string;
-      server_bundle: string | null;
+      bundle_hash: string | null;
       manifest: string;
     }>(
       this.db,
-      `SELECT v.id, v.source_hash, v.asset_hash, v.server_bundle, v.manifest
+      `SELECT v.id, v.source_hash, v.asset_hash, v.bundle_hash, v.manifest
        FROM apps a JOIN app_versions v ON v.id = a.live_version WHERE a.slug = :slug`,
       { slug },
     );
@@ -234,13 +283,12 @@ export class AppStore {
       current &&
       current.source_hash === sourceHash(files) &&
       current.asset_hash === assetHash(built.web) &&
-      current.server_bundle === (built.server?.bundle ?? null) &&
+      current.bundle_hash === (built.server ? sha256(built.server.bundle) : null) &&
       current.manifest === JSON.stringify(built.manifest)
     ) {
       return { ok: true, versionId: current.id, unchanged: true, applied: migrated.applied };
     }
-    // The runner keeps the server code itself; calls then name it by its hash.
-    if (built.server) await this.runner.install(slug, built.server.bundle);
+    // The schema is now the new version's: publish at once, in the same step.
     const versionId = this.publish(slug, files, built, createdBy?.id ?? null);
     return { ok: true, versionId, unchanged: false, applied: migrated.applied };
   }

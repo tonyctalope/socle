@@ -46,6 +46,8 @@ const courses = (extra: Record<string, string> = {}) => ({
       },
     });
     export const noisy = query(() => { console.log('hello from the app'); return 1; });
+    export const loud = query(({}, { size }) => fail('x'.repeat(size), 'c'.repeat(size)));
+    export const echo = query(({}, input) => input);
     export const spin = query(() => { for (;;) {} });
   `,
   ...extra,
@@ -200,6 +202,36 @@ describe('an app, from its sources to the browser', () => {
     assert.equal(((await value(await call(tony, 'list'))) as unknown[]).length, 2);
   });
 
+  it('keeps answers and requests within bounds, whatever the app or the page sends', async () => {
+    // A function that fails with megabytes of text: the page gets a short answer.
+    const loud = await call(tony, 'loud', { input: { size: 3_000_000 } });
+    assert.equal(loud.status, 422);
+    const body = await loud.text();
+    assert.ok(body.length < 2_500, `an error answer of ${body.length} characters`);
+    assert.equal((JSON.parse(body) as { error: string }).error, 'failed');
+    // Input nested deeper than anything can carry is refused as input, not as a crash.
+    const deep = `${'{"a":'.repeat(20_000)}1${'}'.repeat(20_000)}`;
+    const nested = await tony.request(`${COURSES}/_socle/api/fn/echo`, {
+      method: 'POST',
+      headers: { origin: COURSES, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
+      body: `{"input":${deep}}`,
+    });
+    assert.equal(nested.status, 400);
+    assert.equal(((await nested.json()) as { error: string }).error, 'invalid_input');
+    // What a function returns reaches the page as it is, whatever is in it.
+    const tricky = { text: '</script>"\\\u2028', list: [1, [2, [3]]], nothing: null };
+    assert.deepEqual(await value(await call(tony, 'echo', { input: tricky })), tricky);
+    // Sixty-four levels are plenty; more is refused before any function sees it.
+    const nest = (levels: number) => ({ input: JSON.parse(`${'['.repeat(levels)}1${']'.repeat(levels)}`) as unknown });
+    assert.equal((await call(tony, 'echo', nest(64))).status, 200);
+    assert.equal((await call(tony, 'echo', nest(65))).status, 400);
+    assert.equal(
+      (await call(tony, 'echo', { input: { text: '[[['.repeat(100) } })).status,
+      200,
+      'brackets in text are text',
+    );
+  });
+
   it('refuses calls that do not come from the app’s own pages', async () => {
     const before = ((await value(await call(tony, 'list'))) as unknown[]).length;
     const url = `${COURSES}/_socle/api/fn/add`;
@@ -334,6 +366,27 @@ describe('an app, from its sources to the browser', () => {
     assert.equal(ctx.deps.live.count('courses'), 0);
   });
 
+  it('renews the session on the event stream too, and only opens a stream for a GET', async () => {
+    // A page left open reconnects its stream before anything else: that request slides the session.
+    ctx.deps.db
+      .prepare("UPDATE sessions SET last_seen_at = ? WHERE scope = 'courses'")
+      .run(new Date(Date.now() - 3 * 3600 * 1000).toISOString());
+    const stream = await events(tony);
+    assert.equal(stream.response.status, 200);
+    assert.match(stream.response.headers.getSetCookie().join('\n'), /^__Host-socle_app=[^;]+; Max-Age=2592000;/);
+    await stream.close();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const head = await tony.request(`${COURSES}/_socle/api/events`, {
+        method: 'HEAD',
+        headers: { 'sec-fetch-site': 'same-origin' },
+      });
+      assert.equal(head.status, 405);
+    }
+    assert.equal(ctx.deps.live.count('courses'), 0, 'no stream was opened for them');
+  });
+
   it('closes the stream of someone who is no longer signed in, and bounds how many one member holds', async () => {
     const visitor = new Browser(ctx.app);
     const { family } = signIn(ctx, visitor, CHLOE);
@@ -407,6 +460,36 @@ describe('an app, from its sources to the browser', () => {
     assert.match(await (await tony.navigate(`${COURSES}/`)).response.text(), /<title>Courses 2<\/title>/);
     assert.ok(((await value(await call(tony, 'list'))) as unknown[]).length >= 3, 'the data is still there');
     await stream.close();
+  });
+
+  it('keeps the last versions only, and the colors of the version that is live', async () => {
+    const count = () =>
+      (ctx.deps.db.prepare("SELECT COUNT(*) AS n FROM app_versions WHERE app = 'palette'").get() as { n: number }).n;
+    const colors = () =>
+      ctx.deps.db.prepare("SELECT theme_color, background_color FROM apps WHERE slug = 'palette'").get();
+    const publish = (index: number, manifest: object) =>
+      ctx.deps.apps.publish(
+        'palette',
+        { 'app.json': JSON.stringify(manifest), 'web/main.tsx': `export default () => ${index};` },
+        {
+          manifest: { name: 'Palette', description: '', themeColor: null, backgroundColor: null, ...manifest },
+          web: { js: `console.log(${index});`, css: '' },
+          server: null,
+          migrations: [],
+        },
+        null,
+      );
+    const first = publish(0, { themeColor: '#ff0000', backgroundColor: '#00ff00' });
+    assert.deepEqual({ ...(colors() as object) }, { theme_color: '#ff0000', background_color: '#00ff00' });
+    const firstAssets = ctx.deps.apps.live('palette')!.assetHash;
+    let last = first;
+    for (let index = 1; index <= 24; index++) last = publish(index, {});
+    // A version that names no color gets the platform's, not the previous version's.
+    assert.deepEqual({ ...(colors() as object) }, { theme_color: '#f4f1ea', background_color: '#f4f1ea' });
+    assert.equal(count(), 20);
+    assert.equal(ctx.deps.apps.live('palette')!.id, last);
+    assert.equal(ctx.deps.apps.byAssetHash('palette', firstAssets), null, 'the oldest ones are gone, from memory too');
+    assert.ok(publish(25, {}) > last, 'and an id is never given twice');
   });
 
   it('publishes one deployment at a time per app', async () => {
@@ -499,7 +582,7 @@ describe('an app, from its sources to the browser', () => {
       database: 'perdu/live',
       bundleHash: version.bundleHash!,
       fn: 'list',
-      input: null,
+      inputJson: 'null',
       user: null,
       members: [],
       now: 0,

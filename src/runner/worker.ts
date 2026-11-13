@@ -38,19 +38,25 @@ if (!config.once) {
   await stop();
 }
 
+/** Something is broken in this process (a bundler that died, for instance): answer, then leave, so that the next job gets a healthy one. */
+function giveUp(id: number, error: unknown): void {
+  console.error('job failed:', error);
+  process.send!({ id, failure: 'the runner failed to do this' }, () => process.exit(1));
+}
+
 process.on('message', (message: { id: number; job: Job }) => {
   executor.run(message.job).then(
     (result) => {
-      process.send!({ id: message.id, result }, () => {
-        if (config.once) process.exit(0);
-      });
+      try {
+        process.send!({ id: message.id, result }, () => {
+          if (config.once) process.exit(0);
+        });
+      } catch (error) {
+        // A result that cannot be put on the wire.
+        giveUp(message.id, error);
+      }
     },
-    (error: unknown) => {
-      // Not a refusal of the job but something broken in this process (a bundler that died,
-      // for instance): answer, then leave, so that the next job gets a healthy process.
-      console.error('job failed:', error);
-      process.send!({ id: message.id, failure: 'the runner failed to do this' }, () => process.exit(1));
-    },
+    giveUp.bind(null, message.id),
   );
 });
 

@@ -76,7 +76,8 @@ export const MIGRATIONS: readonly string[] = [
   -- What an agent sent (files) and what the runner made of it. A version is never
   -- edited; publishing an app points apps.live_version at one of its versions.
   CREATE TABLE app_versions (
-    id INTEGER PRIMARY KEY,
+    -- AUTOINCREMENT: an id is never given twice, even after old versions are deleted.
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     app TEXT NOT NULL REFERENCES apps(slug) ON DELETE CASCADE,
     created_at TEXT NOT NULL,
     created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,

@@ -33,6 +33,11 @@ interface Guard {
   guest: boolean;
   /** What the last refused statement tried to do, for the error message. */
   denied: string | null;
+  /**
+   * During a call: the tables and views of the app, the only things a statement may read
+   * besides the few names of READABLE. Null in a migration, where the schema is changing.
+   */
+  tables: Set<string> | null;
 }
 
 /** SQLITE_CREATE_TABLE → "CREATE TABLE", for error messages. */
@@ -59,8 +64,35 @@ const REFUSED_FUNCTIONS = new Set(['load_extension', 'readfile', 'writefile', 'e
 const isInternal = (name: string | null) => name !== null && name.toLowerCase().startsWith('sqlite_');
 const isPlatform = (name: string | null) => name !== null && name.toLowerCase().startsWith(PLATFORM_PREFIX);
 
+/** Readable without being a table of the app: the schema itself, and JSON values unfolded as rows. */
+const READABLE = new Set(['sqlite_master', 'sqlite_schema', 'json_each', 'json_tree']);
+
+/**
+ * Tables that exist without having been created: SQLite builds some in (storage internals,
+ * tokenizers), native code no app needs. They are refused by name, from the list of this very
+ * build (`PRAGMA module_list`) plus the ones a build can have without listing them.
+ */
+const builtIn = new Set([
+  'sqlite_dbpage',
+  'sqlite_stmt',
+  'sqlite_memstat',
+  'bytecode',
+  'tables_used',
+  'generate_series',
+]);
+let builtInListed = false;
+
+function listBuiltIn(db: DatabaseSync): void {
+  if (builtInListed) return;
+  for (const row of db.prepare('PRAGMA module_list').all() as { name: string }[]) builtIn.add(row.name.toLowerCase());
+  builtInListed = true;
+}
+
+const isBuiltIn = (name: string) => name.startsWith('pragma_') || builtIn.has(name);
+
 function decide(
   mode: Mode,
+  guard: Guard,
   action: number,
   first: string | null,
   second: string | null,
@@ -74,8 +106,17 @@ function decide(
   }
   if (action === C.SQLITE_SELECT || action === C.SQLITE_RECURSIVE) return true;
   if (action === C.SQLITE_FUNCTION) return !REFUSED_FUNCTIONS.has((second ?? '').toLowerCase());
-  // pragma_* are settings read as tables; the platform's own tables are not the app's business.
-  if (action === C.SQLITE_READ) return !isPlatform(first) && !(first ?? '').toLowerCase().startsWith('pragma_');
+  if (action === C.SQLITE_READ) {
+    // The platform's own tables are not the app's business.
+    const name = (first ?? '').toLowerCase();
+    if (isPlatform(name)) return false;
+    if (READABLE.has(name)) return true;
+    if (isBuiltIn(name)) return false;
+    // During a call, a table of the database must be one of the app's (or SQLite's bookkeeping,
+    // like sqlite_sequence). Without a schema name it is a sub-query the statement named itself.
+    if (guard.tables && schema === 'main') return guard.tables.has(name) || isInternal(name);
+    return true;
+  }
   if (WRITES.has(action)) {
     if (isPlatform(first)) return false;
     // SQLite records schema changes by writing its own tables: only a migration gets there.
@@ -84,9 +125,13 @@ function decide(
   if (mode !== 'migrate') return false;
   // Statistics and index rebuilds change no data, whatever the table.
   if (action === C.SQLITE_ANALYZE || action === C.SQLITE_REINDEX) return true;
-  // ALTER TABLE passes (schema, table); the others pass the object's name first. Names starting
-  // with sqlite_ are SQLite's own (automatic indexes); it refuses them itself from anyone else.
-  if (SCHEMA_CHANGES.has(action)) return !isPlatform(action === C.SQLITE_ALTER_TABLE ? second : first);
+  if (SCHEMA_CHANGES.has(action)) {
+    // ALTER TABLE passes (schema, table). The others pass the object's name, then for indexes and
+    // triggers the table they sit on: neither may be one of the platform's. Names starting with
+    // sqlite_ are SQLite's own (automatic indexes); it refuses them itself from anyone else.
+    if (action === C.SQLITE_ALTER_TABLE) return !isPlatform(second);
+    return !isPlatform(first) && !isPlatform(second);
+  }
   // PRAGMA, ATTACH, DETACH, BEGIN/COMMIT/ROLLBACK, SAVEPOINT, temporary objects, and every virtual
   // table (full-text search included: a large native surface that no app needs yet).
   return false;
@@ -94,7 +139,7 @@ function decide(
 
 function authorizer(mode: Mode, guard: Guard) {
   return (action: number, first: string | null, second: string | null, schema: string | null): number => {
-    if (!guard.guest || decide(mode, action, first, second, schema)) return C.SQLITE_OK;
+    if (!guard.guest || decide(mode, guard, action, first, second, schema)) return C.SQLITE_OK;
     guard.denied = [ACTION_NAMES.get(action) ?? 'this statement', first, second].filter(Boolean).join(' ');
     return C.SQLITE_DENY;
   };
@@ -106,8 +151,6 @@ export interface Connection {
   file: string;
 }
 
-let heapLimited = false;
-
 function connect(file: string, mode: Mode, readOnly: boolean, limits: Limits): Connection {
   const db = new DatabaseSync(file, {
     readOnly,
@@ -117,17 +160,15 @@ function connect(file: string, mode: Mode, readOnly: boolean, limits: Limits): C
     enableDoubleQuotedStringLiterals: false,
   });
   try {
-    if (!heapLimited) {
-      // Process-wide: SQLite fails a statement rather than grow past this.
-      db.exec(`PRAGMA hard_heap_limit = ${limits.sqliteHeap}`);
-      heapLimited = true;
-    }
+    // SQLite cannot bound its own memory here (Node builds it without memory statistics, so
+    // hard_heap_limit is accepted and ignored): the pool watches each worker's memory instead.
     if (!readOnly) {
       db.exec('PRAGMA journal_mode = WAL');
       db.exec('PRAGMA synchronous = NORMAL');
       // The log is cut back to this once its content is in the database file.
-      db.exec('PRAGMA journal_size_limit = 8388608');
+      db.exec(`PRAGMA journal_size_limit = ${Math.min(8 * 1024 * 1024, limits.walBytes)}`);
     }
+    listBuiltIn(db);
     db.exec('PRAGMA trusted_schema = OFF');
     db.exec('PRAGMA temp_store = MEMORY');
     db.exec(`PRAGMA max_page_count = ${limits.dbMaxPages}`);
@@ -145,7 +186,7 @@ function connect(file: string, mode: Mode, readOnly: boolean, limits: Limits): C
       variableNumber: 999,
       triggerDepth: 16,
     });
-    const guard: Guard = { guest: false, denied: null };
+    const guard: Guard = { guest: false, denied: null, tables: null };
     db.setAuthorizer(authorizer(mode, guard));
     return { db, guard, file };
   } catch (error) {
@@ -238,6 +279,28 @@ export function asGuest<T>(connection: Connection, fn: () => T): T {
   }
 }
 
+/**
+ * ROLLBACK also exists as a way to resolve a conflict (INSERT OR ROLLBACK, ON CONFLICT
+ * ROLLBACK, RAISE(ROLLBACK)): not a statement, so never shown to the authorizer, yet it ends
+ * the transaction the platform opened. Refused by its name; `transactionEnded` is the check
+ * that does not depend on reading SQL.
+ */
+export function refuseRollback(sql: string): void {
+  if (/\brollback\b/i.test(sql)) {
+    throw new Error('ROLLBACK is not available, as a statement or as a conflict clause: use ABORT or FAIL');
+  }
+}
+
+export const transactionEnded = (connection: Connection): boolean => !connection.db.isTransaction;
+
+/** Tells a connection which tables a call may read: those of the app as they are now. */
+export function readSchema(connection: Connection): void {
+  const rows = connection.db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").all() as {
+    name: string;
+  }[];
+  connection.guard.tables = new Set(rows.map((row) => row.name.toLowerCase()));
+}
+
 export interface Migration {
   /** File name, e.g. "001_init.sql". Migrations apply in name order, once each. */
   name: string;
@@ -260,6 +323,12 @@ export class MigrationError extends Error {
 }
 
 const checksum = (sql: string) => createHash('sha256').update(sql).digest('hex');
+
+/** Schema objects named like the platform's, or attached to its table, other than its own. */
+const INTRUDERS = `SELECT name FROM sqlite_master
+  WHERE (lower(name) LIKE '~_socle~_%' ESCAPE '~' OR lower(tbl_name) LIKE '~_socle~_%' ESCAPE '~')
+    AND NOT (tbl_name = '${PLATFORM_PREFIX}migrations' AND (type = 'table' OR name LIKE 'sqlite~_autoindex~_%' ESCAPE '~'))
+  LIMIT 1`;
 
 /**
  * Brings an app database up to date. New migrations apply together or not at all;
@@ -312,9 +381,22 @@ export function applyMigrations(
         );
       }
       try {
+        refuseRollback(migration.sql);
         asGuest(connection, () => db.exec(migration.sql));
       } catch (error) {
         throw new MigrationError(migration.name, (error as Error).message);
+      }
+      if (transactionEnded(connection)) {
+        throw new MigrationError(migration.name, 'a migration cannot end the transaction it runs in');
+      }
+      // Nothing of the app may carry the platform's prefix or hang on the platform's table (a
+      // renamed table, a trigger): what the next statement writes there must be the platform's alone.
+      const intruder = db.prepare(INTRUDERS).get() as { name: string } | undefined;
+      if (intruder) {
+        throw new MigrationError(
+          migration.name,
+          `names starting with ${PLATFORM_PREFIX} are the platform's (${intruder.name})`,
+        );
       }
       record.run(migration.name, sum, new Date().toISOString());
       applied.push(migration.name);

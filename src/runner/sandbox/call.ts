@@ -1,6 +1,15 @@
 import type { Limits } from '../limits.ts';
 import { schemaProblem, type Schema } from '../schema.ts';
-import { asGuest, truncateWal, walBytes, type AppDatabases, type Connection } from './appdb.ts';
+import {
+  asGuest,
+  readSchema,
+  refuseRollback,
+  transactionEnded,
+  truncateWal,
+  walBytes,
+  type AppDatabases,
+  type Connection,
+} from './appdb.ts';
 import { createSandbox, GuestFailure, type HostBridge } from './engine.ts';
 
 export interface Member {
@@ -20,7 +29,9 @@ export interface Invocation {
    * write, whatever the code says about itself by the time it runs.
    */
   kind?: 'query' | 'mutation';
-  input: unknown;
+  /** The input, as a value or already as JSON text (`inputJson` wins). */
+  input?: unknown;
+  inputJson?: string;
   /** Null when the platform itself runs the function (a schedule). */
   user: Member | null;
   members: Member[];
@@ -29,8 +40,15 @@ export interface Invocation {
   today: string;
 }
 
-/** The same call as it travels to the runner: the code is named by its hash, not carried along. */
-export type CallRequest = Omit<Invocation, 'bundle'> & { bundleHash: string };
+/**
+ * The same call as it travels to the runner: the code is named by its hash, not carried along,
+ * and the input is JSON text (text always crosses a process boundary; a deeply nested value
+ * may not survive being serialized again).
+ */
+export type CallRequest = Omit<Invocation, 'bundle' | 'input' | 'inputJson'> & {
+  bundleHash: string;
+  inputJson: string;
+};
 
 /** A notification the function asked for; sent by the web side once the call has succeeded. */
 export interface NotifyEffect {
@@ -42,7 +60,8 @@ export interface NotifyEffect {
 }
 
 export type CallResult =
-  | { ok: true; kind: 'query' | 'mutation'; value: unknown; effects: NotifyEffect[]; logs: string[] }
+  /** `json` is what the function returned, as JSON text: it goes to the browser as it is. */
+  | { ok: true; kind: 'query' | 'mutation'; json: string; effects: NotifyEffect[]; logs: string[] }
   | { ok: false; error: { code: string; message: string }; logs: string[] };
 
 export interface FunctionInfo {
@@ -54,6 +73,30 @@ export interface FunctionInfo {
 }
 
 const FUNCTION_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+/** No form sends data nested like this; parsers, on the other hand, pay for every level. */
+const MAX_INPUT_DEPTH = 64;
+
+/** Whether a JSON text nests objects and arrays deeper than `max` (strings are skipped, not parsed). */
+function nestsDeeperThan(json: string, max: number): boolean {
+  let depth = 0;
+  let inString = false;
+  for (let index = 0; index < json.length; index++) {
+    const char = json.charCodeAt(index);
+    if (inString) {
+      if (char === 92)
+        index += 1; // a backslash escapes the next character
+      else if (char === 34) inString = false;
+    } else if (char === 34) {
+      inString = true;
+    } else if (char === 123 || char === 91) {
+      depth += 1;
+      if (depth > max) return true;
+    } else if (char === 125 || char === 93) {
+      depth -= 1;
+    }
+  }
+  return false;
+}
 
 function toParams(json: string): unknown[] | Record<string, unknown> {
   const params: unknown = JSON.parse(json);
@@ -80,6 +123,7 @@ function bindable(value: unknown): string | number | null {
 /** The database half of the bridge: one statement of the app, bounded in what it returns. */
 function runStatement(connection: Connection, op: string, sql: string, paramsJson: string, limits: Limits): string {
   if (sql.length > limits.sqlLength) throw new Error('SQL statement too long');
+  refuseRollback(sql);
   const given = toParams(paramsJson);
   return asGuest(connection, () => {
     const statement = connection.db.prepare(sql);
@@ -99,7 +143,9 @@ function runStatement(connection: Connection, op: string, sql: string, paramsJso
         if (op === 'get') break;
         throw new Error(`the query returns more than ${limits.maxRows} rows: add a LIMIT`);
       }
-      for (const value of Object.values(row)) {
+      // Names count too: they are written once per row in what goes back to the app.
+      for (const [name, value] of Object.entries(row)) {
+        bytes += name.length;
         if (typeof value === 'string') bytes += value.length;
         else if (value instanceof Uint8Array) throw new Error('BLOB values cannot be read by server functions');
         else bytes += 8;
@@ -159,13 +205,22 @@ export async function callFunction(databases: AppDatabases, request: Invocation,
     logs,
   });
   if (!FUNCTION_NAME.test(request.fn)) return failed('unknown_function', 'no such server function');
-  const input = JSON.stringify(request.input ?? null);
+  let input: string;
+  try {
+    input = request.inputJson ?? JSON.stringify(request.input ?? null);
+  } catch {
+    return failed('invalid_input', 'input: nested too deeply');
+  }
   if (input.length > limits.maxInputBytes) return failed('invalid_input', 'input: too large');
+  if (nestsDeeperThan(input, MAX_INPUT_DEPTH)) return failed('invalid_input', 'input: nested too deeply');
 
   const deadline = Date.now() + limits.callMs;
   let connection: Connection | undefined;
   /** Set when the call wrote more than a call may: nothing it does afterwards counts. */
   let flooded = false;
+  /** Set when the call ended the platform's transaction: it gets no further statement. */
+  let escaped = false;
+  let writes = false;
   const bridge: HostBridge = (op, first, second) => {
     if (op === 'log') {
       // What an app prints ends up in the platform's log: one line each, no control characters.
@@ -177,10 +232,17 @@ export async function callFunction(databases: AppDatabases, request: Invocation,
       throw new Error('the database is only available inside a server function, not while the file loads');
     if (Date.now() > deadline) throw new Error('the function ran for too long');
     if (flooded) throw new Error('the function wrote too much data in one call');
-    const answer = runStatement(connection, op, first, second, limits);
+    if (escaped) throw new Error('the function ended its transaction');
+    let answer: string;
+    try {
+      answer = runStatement(connection, op, first, second, limits);
+    } finally {
+      // Whatever the statement did or failed to do, the transaction must still be the platform's.
+      escaped = transactionEnded(connection);
+    }
     // The size of the database is capped, but one transaction can rewrite the same pages over
-    // and over into the write-ahead log: that is capped here.
-    if (op === 'run' && walBytes(connection) > limits.walBytes) {
+    // and over into the write-ahead log: that is capped here, whichever method wrote.
+    if (writes && walBytes(connection) > limits.walBytes) {
       flooded = true;
       throw new Error('the function wrote too much data in one call');
     }
@@ -215,6 +277,8 @@ export async function callFunction(databases: AppDatabases, request: Invocation,
       return failed('busy', 'the app is busy, try again in a moment');
     }
     inTransaction = target;
+    readSchema(target);
+    writes = kind === 'mutation';
     connection = target;
 
     const context = JSON.stringify({
@@ -225,17 +289,34 @@ export async function callFunction(databases: AppDatabases, request: Invocation,
     });
     const answer = sandbox.call('__invoke', [request.fn, context, input], limits.maxResultBytes);
     connection = undefined;
-    let parsed: { value?: unknown; effects?: unknown };
+    let json: string;
+    let effects: NotifyEffect[];
     try {
-      parsed = JSON.parse(answer) as typeof parsed;
-    } catch {
+      const parsed = JSON.parse(answer) as { value?: unknown; effects?: unknown };
+      if (typeof parsed.value !== 'string') throw new Error('no value');
+      JSON.parse(parsed.value); // it must be one JSON value, since it is forwarded as text
+      json = parsed.value;
+      effects = kind === 'mutation' ? readEffects(parsed.effects, limits) : [];
+    } catch (error) {
+      if (error instanceof GuestFailure) throw error;
       return failed('internal', 'unexpected answer from the sandbox');
     }
-    const effects = kind === 'mutation' ? readEffects(parsed.effects, limits) : [];
     if (flooded) return failed('error', 'the function wrote too much data in one call');
-    target.db.exec('COMMIT');
+    if (escaped || transactionEnded(target)) {
+      inTransaction = undefined;
+      return failed(
+        'error',
+        'the function ended its transaction: ROLLBACK is not available, even as a conflict clause',
+      );
+    }
+    try {
+      target.db.exec('COMMIT');
+    } catch (error) {
+      // A constraint checked at the end of the transaction (a deferred foreign key), a full disk.
+      return failed('error', `the changes could not be saved: ${(error as Error).message}`);
+    }
     inTransaction = undefined;
-    return { ok: true, kind, value: parsed.value ?? null, effects, logs };
+    return { ok: true, kind, json, effects, logs };
   } catch (error) {
     if (error instanceof GuestFailure) return failed(error.code, error.message);
     console.error('call failed unexpectedly:', error);
@@ -243,8 +324,10 @@ export async function callFunction(databases: AppDatabases, request: Invocation,
   } finally {
     connection = undefined;
     if (inTransaction) {
+      inTransaction.guard.tables = null;
       try {
-        inTransaction.db.exec('ROLLBACK');
+        // Already gone if the app ended it: there is then nothing to undo.
+        if (!transactionEnded(inTransaction)) inTransaction.db.exec('ROLLBACK');
       } catch {
         // Nothing to undo; if the handle itself is unusable, reopen it next time.
         databases.close(request.database);
@@ -264,8 +347,19 @@ export async function describeBundle(bundle: string, limits: Limits): Promise<Fu
   });
   try {
     sandbox.run(bundle, 'server.js');
+    // This list comes from code that ran next to the app's: every field is checked before it is recorded.
     const listed = JSON.parse(sandbox.call('__describe', [], 1024 * 1024)) as FunctionInfo[];
+    if (!Array.isArray(listed)) throw new GuestFailure('error', 'the server code does not describe its functions');
     for (const info of listed) {
+      if (typeof info !== 'object' || info === null || typeof info.name !== 'string') {
+        throw new GuestFailure('error', 'the server code does not describe its functions');
+      }
+      if (info.kind !== 'query' && info.kind !== 'mutation') {
+        throw new GuestFailure('error', `${info.name}: a function is a query or a mutation`);
+      }
+      if (info.tool !== null && typeof info.tool !== 'string') {
+        throw new GuestFailure('error', `${info.name}.tool: the description for Claude must be text`);
+      }
       if (!FUNCTION_NAME.test(info.name)) {
         throw new GuestFailure(
           'error',

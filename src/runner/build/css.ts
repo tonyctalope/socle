@@ -76,7 +76,8 @@ async function compileSheet(css: string, appFiles: SourceFiles, candidates: stri
   const compiler = await compile(css, {
     base: 'web',
     loadStylesheet: async (id, base) => {
-      const platform = PLATFORM_SHEETS[id] ?? PLATFORM_SHEETS[`${id}.css`];
+      const name = [id, `${id}.css`].find((candidate) => Object.hasOwn(PLATFORM_SHEETS, candidate));
+      const platform = name === undefined ? undefined : PLATFORM_SHEETS[name];
       if (platform) return { path: id, base: 'platform', content: platform() };
       // Written out of habit at the top of a stylesheet: everything it would bring is already there.
       if (id === 'tailwindcss') return { path: id, base: 'platform', content: '' };

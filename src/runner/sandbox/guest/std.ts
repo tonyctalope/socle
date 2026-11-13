@@ -144,7 +144,8 @@ function invoke(name: string, contextJson: string, inputJson: string): string | 
       effects.push({ type: 'notify', to, message });
     },
   });
-  const finish = (value: unknown) => toJson({ value: value === undefined ? null : value, effects });
+  // The value travels as text from here to the browser: nothing in between has to rebuild it.
+  const finish = (value: unknown) => toJson({ value: toJson(value === undefined ? null : value), effects });
   const result = definition.handler(context, input);
   if (typeof result === 'object' && result !== null && typeof (result as PromiseLike<unknown>).then === 'function') {
     return Promise.resolve(result).then(finish);

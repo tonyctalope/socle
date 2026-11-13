@@ -139,15 +139,26 @@ the parent domain. Everything below exists because of that; none of it is option
   inside the sandbox, taken before the app's code loads (in QuickJS a read-only global can still be redefined).
 - **SQL is checked when it is compiled** (`decide()` in `appdb.ts`, an allowlist): own tables only, no PRAGMA,
   ATTACH, transaction statement, temporary object or extension; schema changes only in migrations. ATTACH is also
-  disabled at the engine level (`limits.attach = 0`). The authorizer does not see VACUUM: what stops it is that a
-  call is always inside the platform's transaction, which the app cannot end.
+  disabled at the engine level (`limits.attach = 0`). During a call a statement may only read tables that are in
+  the app's schema; the tables SQLite builds in (`dbstat`, tokenizers…, listed from `PRAGMA module_list`) are
+  refused by name everywhere.
+- **Some things the authorizer never sees**, and are handled otherwise: VACUUM (a call is always inside the
+  platform's transaction), and ROLLBACK as a _conflict clause_ (`INSERT OR ROLLBACK`, `RAISE(ROLLBACK)`), which
+  would end that transaction: refused by name (`refuseRollback`), and `db.isTransaction` is checked after every
+  statement of the app and before COMMIT. A call that lost its transaction gets no further statement and fails.
+- **Nothing of an app may carry the `_socle_` prefix or hang on the platform's table** (a renamed table, a trigger
+  on `_socle_migrations`): checked on the schema after each migration, because the platform's own writes there run
+  unchecked.
 - **A query cannot write** because its connection is read-only, not because of what it declared.
 - **Time limits are enforced by killing the worker process.** The interpreter's own interrupt only fires between
   instructions (a slow built-in or a SQL statement is not interruptible) and is a courtesy, not the guarantee.
   An unfinished transaction is rolled back by SQLite when the file is next opened.
-- **Memory is bounded by the WebAssembly memory of the call** (`limits.guestMemory`, enforced by the engine
-  refusing to grow it). QuickJS's own `setMemoryLimit` does not hold in this build (it cannot measure what it
-  allocated) and must not be relied on. Workers run with `--expose-gc` so a call's memory is released at once.
+- **Memory**: what the app's JavaScript holds is bounded by the WebAssembly memory of the call
+  (`limits.guestMemory`, enforced by the engine refusing to grow it; QuickJS's own `setMemoryLimit` cannot measure
+  what it allocated in this build and must not be relied on). Everything else a job makes its process hold, SQLite's
+  own memory above all (`hard_heap_limit` is ignored by Node's build), is bounded by the pool watching each working
+  process and killing it past `limits.workerMemory`. Workers run with `--expose-gc` so a call's memory is released
+  at once.
 - **Disk is bounded per app**: database size (`max_page_count`), what one call may append to the write-ahead log
   (`walBytes`, checked after each write, the call is undone beyond it), and the size of the schema
   (`maxSchemaObjects`, `maxSchemaBytes`: every connection keeps the schema in memory and a backup pays for it).
@@ -159,8 +170,11 @@ the parent domain. Everything below exists because of that; none of it is option
 - **One app cannot starve the others**: `apphost/gate.ts` lets an app run 2 calls at once (the runner has 3
   workers) with 16 waiting, and refuses the rest at once; a caller that left while waiting is dropped. Keep
   `perApp` below the number of runner workers.
-- **Calls are small**: a call carries its input and a hash, never the app's code. The supervisor bounds how many
-  requests it holds, the pool how many jobs wait.
+- **Calls are small, and so are their answers**: a call carries its input and a hash, never the app's code. Input
+  and result cross every process boundary as JSON text (a deeply nested value may not survive being serialized
+  again), input nesting is bounded, and what is read back from a failing function (name, message, code, stack) is
+  cut inside the sandbox before it is copied out. The supervisor bounds how many requests it holds, the pool how
+  many jobs wait, the client how large an answer it accepts.
 - The web process never opens an app database and never evaluates app code; the runner never sees the platform
   database, a session or a secret (it has no `env_file`, no network, and its workers get an empty environment).
 - App screens are confined by step 1's rules (CSP on every response, host-only cookies). The function endpoint is
@@ -186,10 +200,12 @@ endless loops, memory, recursion, forged answers); `runner.test.ts` covers the w
 `apps.test.ts` goes from sources to HTTP with a real runner; `gate.test.ts` the sharing of workers between apps.
 A security rule without a test is not done.
 
-Independent reviews: 2026-11-12 (step 1, findings fixed) and 2026-11-13 (step 2). The second one was cut short:
-its four most serious findings, all resource exhaustion (memory of a call, bursts of calls carrying the app's code,
-a source that broke the bundler for everyone, one app stopping every backup), are fixed and pinned by tests; its
-lower-ranked findings were never delivered. Step 2 deserves another full review before real data moves in.
+Independent reviews: 2026-11-12 (step 1) and two on 2026-11-13 (step 2). The first one of step 2 was cut short
+after its four most serious findings, all resource exhaustion; the second, a full code review, added sixteen
+(unbounded error answers, a transaction ended by a conflict clause, a trigger on the platform's table, SQLite's
+memory, a job that could not be serialized, and smaller ones). All are fixed and pinned by tests, except two
+left for step 3: the platform database's nightly copy still runs in the web process, and the smoke test starts
+the containers by hand instead of from `compose.yaml`.
 
 ## Roadmap
 

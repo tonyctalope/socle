@@ -95,21 +95,51 @@ interface GuestError {
   stack: string;
 }
 
-function readError(vm: QuickJSContext, handle: QuickJSHandle): GuestError {
+/** What is kept of an error's text. An error is an answer too: it gets a size like any other. */
+const MAX_ERROR_TEXT = 2_000;
+
+/** `(text, max) => text.slice(0, max)`, made of references taken before any code of the app ran. */
+const CUT = '((slice, apply) => (text, max) => apply(slice, text, [0, max]))(String.prototype.slice, Reflect.apply)';
+
+/** A text property of a guest value, never longer than `max`: a long one is cut inside the sandbox, not copied out whole. */
+function readText(vm: QuickJSContext, cut: QuickJSHandle, text: QuickJSHandle, max: number): string {
+  const length = vm.getProp(text, 'length').consume((handle) => vm.getNumber(handle));
+  if (length <= max) return vm.getString(text);
+  const limit = vm.newNumber(max);
+  const result = vm.callFunction(cut, vm.undefined, text, limit);
+  limit.dispose();
+  if (result.error) {
+    result.error.dispose();
+    return '';
+  }
+  return `${result.value.consume((handle) => vm.getString(handle))}…`;
+}
+
+/** Reads what the guest threw, one bounded property at a time (the value is the app's: anything can be in it). */
+function readError(vm: QuickJSContext, cut: QuickJSHandle, thrown: QuickJSHandle): GuestError {
+  const fallback = { name: 'Error', message: 'the function threw a value that cannot be read', stack: '' };
   try {
-    const dumped: unknown = vm.dump(handle);
-    if (typeof dumped === 'object' && dumped !== null) {
-      const error = dumped as Record<string, unknown>;
-      return {
-        name: typeof error.name === 'string' ? error.name : 'Error',
-        message: typeof error.message === 'string' ? error.message : JSON.stringify(dumped).slice(0, 500),
-        code: typeof error.code === 'string' ? error.code : undefined,
-        stack: typeof error.stack === 'string' ? error.stack : '',
-      };
+    const kind = vm.typeof(thrown);
+    if (kind === 'string') return { name: 'Error', message: readText(vm, cut, thrown, MAX_ERROR_TEXT), stack: '' };
+    if (kind !== 'object' && kind !== 'function') {
+      return { name: 'Error', message: `thrown value: ${String(vm.dump(thrown)).slice(0, 100)}`, stack: '' };
     }
-    return { name: 'Error', message: `thrown value: ${String(dumped).slice(0, 500)}`, stack: '' };
+    const text = (property: string, max: number): string | undefined => {
+      const value = vm.getProp(thrown, property);
+      try {
+        return vm.typeof(value) === 'string' ? readText(vm, cut, value, max) : undefined;
+      } finally {
+        value.dispose();
+      }
+    };
+    return {
+      name: text('name', 100) ?? 'Error',
+      message: text('message', MAX_ERROR_TEXT) ?? 'the function threw something that is not an error',
+      code: text('code', 100),
+      stack: text('stack', MAX_ERROR_TEXT) ?? '',
+    };
   } catch {
-    return { name: 'Error', message: 'the function threw a value that cannot be read', stack: '' };
+    return fallback;
   }
 }
 
@@ -132,7 +162,11 @@ function failure(error: GuestError, deadline: number): GuestFailure {
     return new GuestFailure('stack_overflow', 'the function recursed too deeply');
   }
   if (Date.now() > deadline) return new GuestFailure('timeout', 'the function ran for too long and was stopped');
-  if (error.name === 'UserError') return new GuestFailure(`user:${error.code ?? 'failed'}`, error.message);
+  if (error.name === 'UserError') {
+    // The code is chosen by the app and ends up in HTTP answers: a short identifier, or the default.
+    const code = error.code !== undefined && /^[A-Za-z0-9_.-]{1,40}$/.test(error.code) ? error.code : 'failed';
+    return new GuestFailure(`user:${code}`, error.message);
+  }
   if (error.name === 'InputError') return new GuestFailure('invalid_input', error.message);
   if (error.name === 'UnknownFunction') return new GuestFailure('unknown_function', error.message);
   return new GuestFailure('error', `${error.name}: ${error.message}${origin(error.stack)}`.slice(0, 2_000));
@@ -199,7 +233,7 @@ export async function createSandbox(limits: Limits, deadline: number, bridge: Ho
     guarded((context) => {
       const result = context.evalCode(code, filename, { type: 'global' });
       if (result.error) {
-        const error = readError(context, result.error);
+        const error = readError(context, cut!, result.error);
         result.error.dispose();
         throw failure(error, deadline);
       }
@@ -210,7 +244,9 @@ export async function createSandbox(limits: Limits, deadline: number, bridge: Ho
   // app runs: whatever the app does to the globals afterwards, these are what gets called.
   // (Making the global read-only would not do: this engine lets it be redefined anyway.)
   const entries = new Map<Entry, QuickJSHandle>();
+  let cut: QuickJSHandle | undefined;
   try {
+    cut = vm.unwrapResult(vm.evalCode(CUT, 'socle:cut'));
     run(library, 'socle:std');
     guarded((context) => {
       const socle = context.getProp(context.global, '__socle');
@@ -219,6 +255,7 @@ export async function createSandbox(limits: Limits, deadline: number, bridge: Ho
     });
   } catch (error) {
     for (const handle of entries.values()) handle.dispose();
+    cut?.dispose();
     vm.dispose();
     runtime.dispose();
     throw error;
@@ -233,7 +270,7 @@ export async function createSandbox(limits: Limits, deadline: number, bridge: Ho
         const result = context.callFunction(entries.get(entry)!, context.undefined, ...handles);
         for (const handle of handles) handle.dispose();
         if (result.error) {
-          const error = readError(context, result.error);
+          const error = readError(context, cut!, result.error);
           result.error.dispose();
           throw failure(error, deadline);
         }
@@ -244,7 +281,7 @@ export async function createSandbox(limits: Limits, deadline: number, bridge: Ho
             // sandbox, so a promise still pending once the job queue is empty will never settle.
             const jobs = rt.executePendingJobs();
             if (jobs.error) {
-              const error = readError(context, jobs.error);
+              const error = readError(context, cut!, jobs.error);
               jobs.error.dispose();
               throw failure(error, deadline);
             }
@@ -258,7 +295,7 @@ export async function createSandbox(limits: Limits, deadline: number, bridge: Ho
               );
             }
             if (state.type === 'rejected') {
-              const error = readError(context, state.error);
+              const error = readError(context, cut!, state.error);
               state.error.dispose();
               throw failure(error, deadline);
             }
@@ -287,6 +324,7 @@ export async function createSandbox(limits: Limits, deadline: number, bridge: Ho
         // After a crash inside the interpreter its memory is in an unknown state: just drop it.
         if (!broken) {
           for (const handle of entries.values()) handle.dispose();
+          cut?.dispose();
           context?.dispose();
           rt?.dispose();
         }

@@ -36,6 +36,17 @@ export interface Runner {
 
 type Send = <J extends Job>(job: J) => Promise<Reply<J>>;
 
+/** Ways the runner can fail a call that are the call's own outcome, not the runner being away. */
+const CALL_FAILURES: Record<string, string | undefined> = {
+  timeout: 'the function ran for too long and was stopped',
+  memory: 'the function used too much memory and was stopped',
+  busy: 'the platform is busy, try again in a moment',
+  crashed: 'the function crashed the sandbox',
+};
+
+/** The largest answer the runner sends: a built app (screens, stylesheet, server code). */
+const MAX_REPLY = 24 * 1024 * 1024;
+
 function runner(send: Send, healthy: () => Promise<boolean>, close: () => Promise<void>): Runner {
   const run = async <J extends Job>(job: J): Promise<JobResult<J>> => {
     const reply = await send(job);
@@ -53,19 +64,10 @@ function runner(send: Send, healthy: () => Promise<boolean>, close: () => Promis
         return await run({ type: 'call', request: callRequest });
       } catch (error) {
         // A killed or overloaded worker is, for the caller, one more way a function can fail.
-        if (
-          error instanceof RunnerUnavailable &&
-          (error.code === 'timeout' || error.code === 'busy' || error.code === 'crashed')
-        ) {
-          const message =
-            error.code === 'timeout'
-              ? 'the function ran for too long and was stopped'
-              : error.code === 'busy'
-                ? 'the platform is busy, try again in a moment'
-                : 'the function crashed the sandbox';
-          return { ok: false, error: { code: error.code, message }, logs: [] };
-        }
-        throw error;
+        if (!(error instanceof RunnerUnavailable)) throw error;
+        const message = Object.hasOwn(CALL_FAILURES, error.code) ? CALL_FAILURES[error.code] : undefined;
+        if (message === undefined) throw error;
+        return { ok: false, error: { code: error.code, message }, logs: [] };
       }
     },
     healthy,
@@ -103,7 +105,15 @@ function post<T>(
       },
       (response) => {
         const chunks: Buffer[] = [];
-        response.on('data', (chunk: Buffer) => chunks.push(chunk));
+        let size = 0;
+        response.on('data', (chunk: Buffer) => {
+          size += chunk.length;
+          if (size > MAX_REPLY) {
+            outgoing.destroy(new RunnerUnavailable('crashed', 'the runner sent an answer that is too large'));
+            return;
+          }
+          chunks.push(chunk);
+        });
         response.on('end', () => {
           try {
             resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')) as T);
