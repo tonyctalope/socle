@@ -7,6 +7,7 @@ import {
   applyMigrations,
   backupDatabase,
   MigrationError,
+  resetDatabase,
   type Migration,
   type MigrationOutcome,
 } from './sandbox/appdb.ts';
@@ -21,7 +22,8 @@ export type Job =
   /** Stores an app's server code, so that calls can name it by its hash. */
   | { type: 'install'; app: string; bundle: string }
   | { type: 'build'; files: unknown }
-  | { type: 'migrate'; database: string; migrations: Migration[] }
+  /** `reset` empties the database first: for a draft's database only, never the published one. */
+  | { type: 'migrate'; database: string; migrations: Migration[]; reset?: boolean }
   | { type: 'vendor' }
   /** Copies an app database next to it, once per day. */
   | { type: 'backup'; database: string; date: string; keep: number };
@@ -106,7 +108,11 @@ export function createExecutor(appsDir: string, limits: Limits): Executor {
       case 'migrate': {
         let connection;
         try {
+          if (job.reset && job.database.endsWith('/live')) {
+            return { ok: false, migration: null, message: 'the published database is never emptied' };
+          }
           connection = databases.migrator(job.database);
+          if (job.reset) resetDatabase(connection);
           return { ok: true, ...applyMigrations(connection, job.migrations, limits) };
         } catch (error) {
           if (error instanceof MigrationError) return { ok: false, migration: error.migration, message: error.message };

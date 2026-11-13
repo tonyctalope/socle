@@ -56,6 +56,7 @@ const FR: Record<string, string> = {
   'The sign-in link expired, or cookies are blocked for this site.':
     'Le lien de connexion a expiré ou les cookies sont bloqués pour ce site.',
   'This app has no published version yet.': 'Cette appli n’a pas encore de version publiée.',
+  'This app has no draft that builds yet.': 'Cette appli n’a pas encore de brouillon qui fonctionne.',
   '{name} needs JavaScript to work.': '{name} a besoin de JavaScript pour fonctionner.',
   'Sign-in required.': 'Connexion requise.',
   'Unexpected origin.': 'Origine inattendue.',

@@ -2,7 +2,7 @@ import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { html } from 'hono/html';
 import { canAccess, getApp, listApps } from '../apps/registry.ts';
-import { isValidSlug } from '../apps/slug.ts';
+import { parseSite } from '../apps/slug.ts';
 import { clearAppCookie, readAppCookie, setAppCookie } from '../auth/cookies.ts';
 import { CALLBACK_PATH, LOGIN_COOKIE, LOGIN_TTL_SEC, LoginError } from '../auth/oidc.ts';
 import {
@@ -93,7 +93,8 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
         }),
       );
     }
-    const apps = listApps(db).filter((row) => canAccess(session.user, row));
+    // An app that was never published only exists for those who work on it (see /admin).
+    const apps = listApps(db).filter((row) => row.live_version !== null && canAccess(session.user, row));
     return c.html(
       page(
         config.locale,
@@ -236,18 +237,19 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
       return c.html(tooMany(), 429);
     }
     const home = { href: '/', label: t('Home') };
-    const slug = c.req.query('app') ?? '';
+    // `app` names one of an app's two addresses: the published one or its draft's.
+    const site = parseSite(c.req.query('app') ?? '');
     const state = c.req.query('state') ?? '';
     const next = safeNextPath(c.req.query('next'), 300);
-    if (!isValidSlug(slug) || !isToken(state)) {
+    if (!site || !isToken(state)) {
       return c.html(message(t('Invalid link'), t('This sign-in link is incomplete.'), home), 400);
     }
     const session = c.get('session');
     if (!session) {
-      const back = `/sso/start?app=${slug}&state=${state}&next=${encodeURIComponent(next)}`;
+      const back = `/sso/start?app=${site.label}&state=${state}&next=${encodeURIComponent(next)}`;
       return c.redirect(`/auth/start?next=${encodeURIComponent(back)}`, 302);
     }
-    const target = getApp(db, slug);
+    const target = getApp(db, site.slug);
     if (!target) return c.html(message(t('App not found'), t('This app does not exist.'), home), 404);
     if (!canAccess(session.user, target)) {
       return c.html(
@@ -257,12 +259,12 @@ export function controlApp(deps: Deps): Hono<ControlEnv> {
     }
     const code = createSsoCode(
       db,
-      { userId: session.user.id, app: slug, family: session.family, state, nextPath: next },
+      { userId: session.user.id, app: site.label, family: session.family, state, nextPath: next },
       deps.now(),
     );
     if (!code) return c.html(message(t('Too many sign-ins in progress'), t('Try again in a minute.')), 503);
     c.header('Cache-Control', 'no-store');
-    return c.redirect(`${appOrigin(config, slug)}/_socle/sso?code=${code}`, 302);
+    return c.redirect(`${appOrigin(config, site.label)}/_socle/sso?code=${code}`, 302);
   });
 
   app.notFound((c) =>

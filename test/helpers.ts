@@ -1,3 +1,4 @@
+import { siteOf } from '../src/apps/slug.ts';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -103,6 +104,7 @@ export function setup(
   const apps = new AppStore(db, runner);
   const live = new LiveHub();
   apps.onPublish = (slug) => live.publish(slug, 'version');
+  apps.onDraft = (slug) => live.publish(siteOf(slug, true).label, 'version');
   publishFake(apps, 'demo', 'Demo');
   // A second app, registered but without a published version.
   run(db, `INSERT INTO apps (slug, name, created_at) VALUES ('notes', 'Notes', :now)`, {

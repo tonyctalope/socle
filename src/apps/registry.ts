@@ -10,6 +10,9 @@ export interface AppRow {
   created_at: string;
   /** The published version (app_versions.id), or null while the app has none. */
   live_version: number | null;
+  /** The last draft that built (app_versions.id), served on the draft address. */
+  draft_version: number | null;
+  created_by: number | null;
 }
 
 export const DEMO_SLUG = 'demo';

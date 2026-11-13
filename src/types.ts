@@ -2,6 +2,7 @@ import type { CallGate } from './apphost/gate.ts';
 import type { LiveHub } from './apphost/live.ts';
 import type { VendorCache } from './apphost/vendor.ts';
 import type { AppRow } from './apps/registry.ts';
+import type { Site } from './apps/slug.ts';
 import type { AppStore } from './apps/store.ts';
 import type { IdentityProvider } from './auth/oidc.ts';
 import type { ActiveSession } from './auth/sessions.ts';
@@ -38,10 +39,18 @@ export interface ControlEnv {
 export interface AppHostEnv {
   Variables: {
     app: AppRow;
+    /** Which of the app's two addresses this is: the published one or the draft's. */
+    site: Site;
     session: ActiveSession | null;
   };
 }
 
 export function allowlist(config: Config): (email: string) => boolean {
   return (email) => config.allowedEmails.has(email.toLowerCase());
+}
+
+/** Admins publish apps and manage the instance; being removed from the allowlist ends that too. */
+export function isAdmin(config: Config, user: { email: string }): boolean {
+  const email = user.email.toLowerCase();
+  return config.allowedEmails.has(email) && config.adminEmails.has(email);
 }

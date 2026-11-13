@@ -30,13 +30,14 @@ function embeddedJson(value: unknown): string {
  * the same way and no inline script is ever needed. The boot data is a JSON block:
  * browsers do not execute it, the SDK reads it.
  */
-export function shellPage(app: AppRow, assetHash: string, boot: BootData, t: Translate) {
+export function shellPage(app: AppRow, assetHash: string, boot: BootData, t: Translate, draft = false) {
+  const title = draft ? `${app.name} (draft)` : app.name;
   return html`<!doctype html>
     <html lang="${boot.locale}">
       <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-        <title>${app.name}</title>
+        <title>${title}</title>
         <meta name="description" content="${app.description}" />
         <meta name="robots" content="noindex" />
         <meta name="color-scheme" content="light dark" />
@@ -46,7 +47,7 @@ export function shellPage(app: AppRow, assetHash: string, boot: BootData, t: Tra
         <link rel="apple-touch-icon" href="/_socle/icons/apple-touch-icon.png" />
         <meta name="mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
-        <meta name="apple-mobile-web-app-title" content="${app.name}" />
+        <meta name="apple-mobile-web-app-title" content="${title}" />
         <meta name="apple-mobile-web-app-status-bar-style" content="default" />
         <link rel="stylesheet" href="${VENDOR}/ui.css" />
         <link rel="stylesheet" href="/assets/${assetHash}/style.css" />

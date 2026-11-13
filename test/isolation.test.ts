@@ -114,7 +114,8 @@ describe('what an app page is allowed to do', () => {
     const page = await response.text();
     assert.doesNotMatch(page, /<script/i);
     assert.match(page, /href="https:\/\/demo\.apps\.test\/"/);
-    assert.match(page, /href="https:\/\/notes\.apps\.test\/"/);
+    // An app that was never published is not on the home page.
+    assert.doesNotMatch(page, /notes\.apps\.test/);
     ctx.cleanup();
   });
 

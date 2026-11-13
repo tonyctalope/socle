@@ -170,6 +170,8 @@ describe('Sign-in with an OpenID Connect provider and the e-mail allowlist', () 
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite~_%' ESCAPE '~'",
     );
     assert.deepEqual(tables.map((table) => table.name).sort(), [
+      'app_drafts',
+      'app_logs',
       'app_versions',
       'apps',
       'push_subscriptions',

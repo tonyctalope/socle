@@ -24,7 +24,8 @@ export class RunnerUnavailable extends Error {
 export interface Runner {
   build(files: unknown): Promise<BuildOutcome>;
   vendor(): Promise<VendorFiles>;
-  migrate(database: string, migrations: Migration[]): Promise<MigrateResult>;
+  /** `reset` empties the database first (a draft's database only). */
+  migrate(database: string, migrations: Migration[], options?: { reset?: boolean }): Promise<MigrateResult>;
   /** Stores an app's server code in the runner and returns the hash that calls name it by. */
   install(app: string, bundle: string): Promise<string>;
   call(request: CallRequest): Promise<CallResult>;
@@ -56,7 +57,8 @@ function runner(send: Send, healthy: () => Promise<boolean>, close: () => Promis
   return {
     build: (files) => run({ type: 'build', files }),
     vendor: () => run({ type: 'vendor' }),
-    migrate: (database, migrations) => run({ type: 'migrate', database, migrations }),
+    migrate: (database, migrations, options) =>
+      run({ type: 'migrate', database, migrations, ...(options?.reset ? { reset: true } : {}) }),
     install: async (app, bundle) => (await run({ type: 'install', app, bundle })).hash,
     backup: (database, date, keep) => run({ type: 'backup', database, date, keep }),
     async call(callRequest) {

@@ -99,4 +99,33 @@ export const MIGRATIONS: readonly string[] = [
   /* 3 — sign-in is any OpenID Connect provider: the column holds its `sub` claim */ `
   ALTER TABLE users RENAME COLUMN google_sub TO subject;
   `,
+  /* 4 — drafts: what agents edit, built and served apart from the published version */ `
+  -- The working copy of an app. Building it gives a version (apps.draft_version) that only
+  -- the app's draft address serves, on a database of its own. \`problems\` is what the last
+  -- build said (JSON), null when it built.
+  CREATE TABLE app_drafts (
+    app TEXT PRIMARY KEY REFERENCES apps(slug) ON DELETE CASCADE,
+    files TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    problems TEXT
+  );
+  ALTER TABLE apps ADD COLUMN draft_version INTEGER REFERENCES app_versions(id) ON DELETE SET NULL;
+  ALTER TABLE apps ADD COLUMN created_by INTEGER REFERENCES users(id) ON DELETE SET NULL;
+  -- Set when a version becomes the published one. Versions that were only ever drafts are not history.
+  ALTER TABLE app_versions ADD COLUMN published_at TEXT;
+  UPDATE app_versions SET published_at = created_at;
+
+  -- What an app's functions logged or failed with, for whoever writes the app. target: 'live' or 'draft'.
+  CREATE TABLE app_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    app TEXT NOT NULL REFERENCES apps(slug) ON DELETE CASCADE,
+    target TEXT NOT NULL,
+    at TEXT NOT NULL,
+    level TEXT NOT NULL,
+    fn TEXT,
+    message TEXT NOT NULL
+  );
+  CREATE INDEX app_logs_app ON app_logs(app, id);
+  `,
 ];
