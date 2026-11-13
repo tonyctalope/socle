@@ -467,11 +467,16 @@ describe('an app, from its sources to the browser', () => {
   it('gives each app its turn at the runner, and refuses a flood instead of queueing it', async () => {
     // One member's page of "courses" fires a burst of calls that each hold a worker until stopped.
     const burst = Array.from({ length: 30 }, () => call(tony, 'spin'));
-    // Meanwhile the other app answers: the stuck one never holds every worker.
-    const started = Date.now();
+    let burstOver = false;
+    const settled = Promise.all(burst).then((responses) => {
+      burstOver = true;
+      return responses;
+    });
+    // Meanwhile the other app answers: the stuck one never holds every worker, and the other
+    // app's call does not wait behind its line.
     assert.deepEqual(await value(await call(tony, 'list', {}, SECRETS)), [{ label: 'code du coffre' }, { label: 'x' }]);
-    assert.ok(Date.now() - started < 400, 'answered while the other app was stuck');
-    const statuses = (await Promise.all(burst)).map((response) => response.status);
+    assert.equal(burstOver, false, 'answered while the other app was still stuck');
+    const statuses = (await settled).map((response) => response.status);
     // Two run at a time, sixteen wait their turn (and give up when it takes too long), the rest are refused at once.
     assert.equal(statuses.filter((status) => status === 503).length >= 12, true, JSON.stringify(statuses));
     assert.ok(
