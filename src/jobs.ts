@@ -23,36 +23,65 @@ export function backupDatabase(deps: Deps, date: string): string | null {
   return file;
 }
 
-/** Each published app's own data, copied by the runner (the only process that opens those files). */
-export async function backupApps(deps: Deps, date: string): Promise<number> {
+/**
+ * Each published app's own data, copied by the runner (the only process that opens those
+ * files). One app's copy failing, for whatever reason, never stops the others: `failed` lists
+ * the apps to try again.
+ */
+export async function backupApps(deps: Deps, date: string): Promise<{ written: number; failed: string[] }> {
   let written = 0;
+  const failed: string[] = [];
   for (const app of listApps(deps.db)) {
     if (app.live_version === null) continue;
-    const result = await deps.runner.backup(liveDatabase(app.slug), date, KEEP_BACKUPS);
-    if (!result.ok) console.error(`backup of ${app.slug} failed: ${result.message}`);
-    else if (result.written) written += 1;
+    try {
+      const result = await deps.runner.backup(liveDatabase(app.slug), date, KEEP_BACKUPS);
+      if (result.ok) {
+        if (result.written) written += 1;
+        continue;
+      }
+      console.error(`backup of ${app.slug} failed: ${result.message}`);
+    } catch (error) {
+      // Too slow and stopped, or the runner is away.
+      console.error(`backup of ${app.slug} failed: ${(error as Error).message}`);
+    }
+    failed.push(app.slug);
   }
-  return written;
+  return { written, failed };
 }
+
+/** How many times in a day the apps' backups are attempted before waiting for the next day. */
+const BACKUP_ATTEMPTS = 3;
 
 export function startJobs(deps: Deps): () => void {
   let lastBackup = '';
+  let appBackups = { day: '', attempts: 0, running: false };
   const tick = () => {
     try {
       purgeExpired(deps.db);
       const now = deps.now().toISOString();
       const today = now.slice(0, 10);
       // 02:30 UTC: the middle of the night in France, summer and winter.
-      if (today !== lastBackup && now.slice(11, 16) >= '02:30') {
+      if (now.slice(11, 16) < '02:30') return;
+      if (today !== lastBackup) {
         const file = backupDatabase(deps, today);
         if (file) console.info(`backup written: ${file}`);
         lastBackup = today;
-        backupApps(deps, today).then(
-          (count) => count && console.info(`app backups written: ${count}`),
-          // The runner was away: the platform's own backup is done, the apps' will be retried tomorrow.
-          (error: unknown) => console.error('app backups failed:', (error as Error).message),
-        );
       }
+      if (appBackups.day !== today) appBackups = { day: today, attempts: 0, running: false };
+      if (appBackups.running || appBackups.attempts >= BACKUP_ATTEMPTS) return;
+      const round = appBackups;
+      round.running = true;
+      round.attempts += 1;
+      void backupApps(deps, today)
+        .then(({ written, failed }) => {
+          if (written) console.info(`app backups written: ${written}`);
+          // Everything copied: no further attempt today. Otherwise the next tick tries again.
+          if (failed.length === 0) round.attempts = BACKUP_ATTEMPTS;
+        })
+        .catch((error: unknown) => console.error('app backups failed:', (error as Error).message))
+        .finally(() => {
+          round.running = false;
+        });
     } catch (error) {
       console.error('background job failed:', error);
     }

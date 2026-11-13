@@ -1,3 +1,4 @@
+import type { CallGate } from './apphost/gate.ts';
 import type { LiveHub } from './apphost/live.ts';
 import type { VendorCache } from './apphost/vendor.ts';
 import type { AppRow } from './apps/registry.ts';
@@ -18,6 +19,8 @@ export interface Deps {
   runner: Runner;
   apps: AppStore;
   live: LiveHub;
+  /** Shares the runner's workers between apps (see apphost/gate.ts). Created by the app host when absent. */
+  gate?: CallGate;
   vendor: Pick<VendorCache, 'get' | 'warm'>;
   now: () => Date;
   /** How often an open event stream is checked and kept alive (tests shorten it). */

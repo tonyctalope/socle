@@ -82,11 +82,16 @@ Browser side, `useQuery('name', input)` reads a query and refetches it whenever 
 
 - `build/` — esbuild fed from the in-memory map by a plugin that answers **every** import (`bundle.ts`), Tailwind's
   pure-JS `compile()` with `@plugin`/`@config` refused (`css.ts`). Nothing is installed, nothing is written.
-- `sandbox/engine.ts` — QuickJS compiled to WebAssembly; **a fresh WebAssembly instance per call**.
-  `sandbox/guest/std.ts` is `@socle/server`, bundled at start and loaded into each instance before the app.
+  `files.ts` bounds what is accepted (bytes, line length, bracket nesting) before any parser reads it.
+- `sandbox/engine.ts` — QuickJS compiled to WebAssembly; **a fresh WebAssembly instance, with its own capped
+  memory, per call**. `sandbox/guest/std.ts` is `@socle/server`, loaded into each instance before the app.
 - `sandbox/appdb.ts` — one SQLite file per app (`<APPS_DIR>/<slug>/live.db`), an authorizer, engine limits, and
   two handles: queries run on a read-only one. `sandbox/call.ts` — one transaction per call.
-- `pool.ts` / `worker.ts` — worker processes, one job at a time each, **killed when a job outlives its deadline**.
+- `bundles.ts` — the runner keeps each app's server code on disk, named by its hash; a call names the hash. If the
+  runner does not have it (`bundle_missing`), the web side sends it again from the platform database.
+- `pool.ts` / `worker.ts` — two kinds of processes, all **killed when a job outlives its deadline**: a few workers
+  that stay up and only serve calls, and **one fresh process per build, migration or backup**, gone afterwards
+  (nothing a hostile source did to the bundler or the CSS compiler outlives its job).
 - `supervisor.ts` / `client.ts` — the same jobs over a Unix socket (production) or in-process (development, tests).
 
 ## Invariants (security)
@@ -140,7 +145,22 @@ the parent domain. Everything below exists because of that; none of it is option
 - **Time limits are enforced by killing the worker process.** The interpreter's own interrupt only fires between
   instructions (a slow built-in or a SQL statement is not interruptible) and is a courtesy, not the guarantee.
   An unfinished transaction is rolled back by SQLite when the file is next opened.
+- **Memory is bounded by the WebAssembly memory of the call** (`limits.guestMemory`, enforced by the engine
+  refusing to grow it). QuickJS's own `setMemoryLimit` does not hold in this build (it cannot measure what it
+  allocated) and must not be relied on. Workers run with `--expose-gc` so a call's memory is released at once.
+- **Disk is bounded per app**: database size (`max_page_count`), what one call may append to the write-ahead log
+  (`walBytes`, checked after each write, the call is undone beyond it), and the size of the schema
+  (`maxSchemaObjects`, `maxSchemaBytes`: every connection keeps the schema in memory and a backup pays for it).
+- **A function runs as what it was published as**: the web side sends the kind recorded by the build, and the
+  runner refuses a call whose code now says otherwise. A published query therefore always gets the read-only
+  connection, even if its code decides at load time to call itself a mutation.
+- **No virtual tables** (full-text search included) until an app needs one: it is a large native surface.
 - **Nothing survives a call**: new WebAssembly instance, new interpreter, no shared state between apps or calls.
+- **One app cannot starve the others**: `apphost/gate.ts` lets an app run 2 calls at once (the runner has 3
+  workers) with 16 waiting, and refuses the rest at once; a caller that left while waiting is dropped. Keep
+  `perApp` below the number of runner workers.
+- **Calls are small**: a call carries its input and a hash, never the app's code. The supervisor bounds how many
+  requests it holds, the pool how many jobs wait.
 - The web process never opens an app database and never evaluates app code; the runner never sees the platform
   database, a session or a secret (it has no `env_file`, no network, and its workers get an empty environment).
 - App screens are confined by step 1's rules (CSP on every response, host-only cookies). The function endpoint is
@@ -163,8 +183,13 @@ and `isolation.test.ts` pin the step 1 invariants; `google-login.test.ts` runs a
 
 `sandbox.test.ts` is the list of things an app's server code must not be able to do (other apps' data, files,
 endless loops, memory, recursion, forged answers); `runner.test.ts` covers the worker processes and the kills;
-`apps.test.ts` goes from sources to HTTP with a real runner. A security rule without a test is not done.
-Independent reviews on 2026-11-12 (step 1) and 2026-11-13 (step 2): their findings are fixed and pinned by tests.
+`apps.test.ts` goes from sources to HTTP with a real runner; `gate.test.ts` the sharing of workers between apps.
+A security rule without a test is not done.
+
+Independent reviews: 2026-11-12 (step 1, findings fixed) and 2026-11-13 (step 2). The second one was cut short:
+its four most serious findings, all resource exhaustion (memory of a call, bursts of calls carrying the app's code,
+a source that broke the bundler for everyone, one app stopping every backup), are fixed and pinned by tests; its
+lower-ranked findings were never delivered. Step 2 deserves another full review before real data moves in.
 
 ## Roadmap
 

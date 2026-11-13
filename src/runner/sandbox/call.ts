@@ -1,6 +1,6 @@
 import type { Limits } from '../limits.ts';
 import { schemaProblem, type Schema } from '../schema.ts';
-import { asGuest, type AppDatabases, type Connection } from './appdb.ts';
+import { asGuest, truncateWal, walBytes, type AppDatabases, type Connection } from './appdb.ts';
 import { createSandbox, GuestFailure, type HostBridge } from './engine.ts';
 
 export interface Member {
@@ -8,12 +8,18 @@ export interface Member {
   name: string;
 }
 
-export interface CallRequest {
+/** One call of a server function, with the code to run it. */
+export interface Invocation {
   /** "<app>/<name>": which database the function sees. */
   database: string;
   /** The app's server code, as produced by the build. */
   bundle: string;
   fn: string;
+  /**
+   * What the function was published as. A query always runs on the connection that cannot
+   * write, whatever the code says about itself by the time it runs.
+   */
+  kind?: 'query' | 'mutation';
   input: unknown;
   /** Null when the platform itself runs the function (a schedule). */
   user: Member | null;
@@ -22,6 +28,9 @@ export interface CallRequest {
   now: number;
   today: string;
 }
+
+/** The same call as it travels to the runner: the code is named by its hash, not carried along. */
+export type CallRequest = Omit<Invocation, 'bundle'> & { bundleHash: string };
 
 /** A notification the function asked for; sent by the web side once the call has succeeded. */
 export interface NotifyEffect {
@@ -142,7 +151,7 @@ function readEffects(raw: unknown, limits: Limits): NotifyEffect[] {
  * Runs one server function of an app: fresh sandbox, one transaction. A query gets a
  * handle that cannot write; a mutation commits only if the function returns.
  */
-export async function callFunction(databases: AppDatabases, request: CallRequest, limits: Limits): Promise<CallResult> {
+export async function callFunction(databases: AppDatabases, request: Invocation, limits: Limits): Promise<CallResult> {
   const logs: string[] = [];
   const failed = (code: string, message: string): CallResult => ({
     ok: false,
@@ -155,6 +164,8 @@ export async function callFunction(databases: AppDatabases, request: CallRequest
 
   const deadline = Date.now() + limits.callMs;
   let connection: Connection | undefined;
+  /** Set when the call wrote more than a call may: nothing it does afterwards counts. */
+  let flooded = false;
   const bridge: HostBridge = (op, first, second) => {
     if (op === 'log') {
       // What an app prints ends up in the platform's log: one line each, no control characters.
@@ -165,7 +176,15 @@ export async function callFunction(databases: AppDatabases, request: CallRequest
     if (!connection)
       throw new Error('the database is only available inside a server function, not while the file loads');
     if (Date.now() > deadline) throw new Error('the function ran for too long');
-    return runStatement(connection, op, first, second, limits);
+    if (flooded) throw new Error('the function wrote too much data in one call');
+    const answer = runStatement(connection, op, first, second, limits);
+    // The size of the database is capped, but one transaction can rewrite the same pages over
+    // and over into the write-ahead log: that is capped here.
+    if (op === 'run' && walBytes(connection) > limits.walBytes) {
+      flooded = true;
+      throw new Error('the function wrote too much data in one call');
+    }
+    return answer;
   };
 
   let sandbox;
@@ -180,6 +199,13 @@ export async function callFunction(databases: AppDatabases, request: CallRequest
     const kind = sandbox.call('__kind', [request.fn], 16);
     if (kind !== 'query' && kind !== 'mutation')
       return failed('unknown_function', `no server function named "${request.fn}"`);
+
+    if (request.kind && request.kind !== kind) {
+      return failed(
+        'error',
+        `${request.fn} was published as a ${request.kind} but is now a ${kind}: publish the app again`,
+      );
+    }
 
     const pair = databases.get(request.database);
     const target = kind === 'query' ? pair.read : pair.write;
@@ -206,6 +232,7 @@ export async function callFunction(databases: AppDatabases, request: CallRequest
       return failed('internal', 'unexpected answer from the sandbox');
     }
     const effects = kind === 'mutation' ? readEffects(parsed.effects, limits) : [];
+    if (flooded) return failed('error', 'the function wrote too much data in one call');
     target.db.exec('COMMIT');
     inTransaction = undefined;
     return { ok: true, kind, value: parsed.value ?? null, effects, logs };
@@ -222,6 +249,7 @@ export async function callFunction(databases: AppDatabases, request: CallRequest
         // Nothing to undo; if the handle itself is unusable, reopen it next time.
         databases.close(request.database);
       }
+      if (flooded) truncateWal(inTransaction);
     }
     sandbox.dispose();
   }

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -11,7 +11,7 @@ import { callFunction, describeBundle, type CallRequest, type CallResult } from 
 // What an app's server code can and cannot do. Each test writes the code an app
 // would send, builds it as the platform does, and calls it in a real sandbox.
 
-const LIMITS: Limits = { ...DEFAULT_LIMITS, callMs: 400, guestMemory: 16 * 1024 * 1024 };
+const LIMITS: Limits = { ...DEFAULT_LIMITS, callMs: 400, guestMemory: 32 * 1024 * 1024 };
 const TONY = { id: 1, name: 'Tony' };
 const CHLOE = { id: 2, name: 'Chloé' };
 
@@ -31,6 +31,7 @@ async function app(name: string, source: string, migrations: Record<string, stri
     applyMigrations(
       connection,
       Object.entries(migrations).map(([file, sql]) => ({ name: file, sql })),
+      LIMITS,
     );
   } finally {
     connection.db.close();
@@ -404,7 +405,7 @@ describe('what an app cannot do with its database', () => {
         `,
       });
       const connection = small.migrator('quota/live');
-      applyMigrations(connection, [{ name: '001.sql', sql: 'CREATE TABLE blobs (body TEXT)' }]);
+      applyMigrations(connection, [{ name: '001.sql', sql: 'CREATE TABLE blobs (body TEXT)' }], limits);
       connection.db.close();
       const request = {
         database: 'quota/live',
@@ -503,6 +504,79 @@ describe('what an app cannot do with the machine', () => {
     assert.deepEqual(value(await notes.call('add', { body: 'après' })), { changes: 1, lastInsertRowid: 1 });
   });
 
+  it('cannot hold more memory than a call is given, however it asks', async () => {
+    const notes = await app(
+      'budget',
+      `
+      const MiB = 1 << 20;
+      const fill = (make) => { const kept = []; let failed = null; try { for (let i = 0; i < 200; i++) kept.push(make(i)); } catch (error) { failed = error.message; } return { kept: kept.length, failed }; };
+      export const buffers = query(() => fill(() => new Uint8Array(MiB).fill(1)));
+      export const texts = query(() => fill((i) => 'x'.repeat(MiB) + i));
+      export const arrays = query(() => fill(() => new Array(MiB / 8).fill(1.5)));
+      export const stubborn = query(() => { const kept = []; let refused = 0; for (let i = 0; i < 2000; i++) { try { kept.push(new Uint8Array(MiB).fill(1)); } catch { refused++; } } return { kept: kept.length, refused }; });
+      export const fine = query(() => JSON.stringify(Array.from({ length: 20000 }, (_, i) => ({ i, s: 'row ' + i }))).length);
+    `,
+    );
+    // 32 MiB for the whole interpreter: none of these gets to keep 200 MiB.
+    for (const fn of ['buffers', 'texts', 'arrays']) {
+      const { kept, failed } = value(await notes.call(fn)) as { kept: number; failed: string };
+      assert.ok(kept < 32, `${fn} kept ${kept} MiB`);
+      assert.equal(failed, 'out of memory');
+    }
+    const stubborn = value(await notes.call('stubborn')) as { kept: number; refused: number };
+    assert.ok(stubborn.kept < 32 && stubborn.refused > 1900, JSON.stringify(stubborn));
+    assert.equal(value(await notes.call('fine')), 537781);
+  });
+
+  it('runs a function as what it was published as', async () => {
+    // The code decides what it is each time it loads; what counts is what the build recorded.
+    const shifty = await app(
+      'shifty',
+      `
+      const define = globalThis.__socle_loaded_once ? mutation : query;
+      const asked = (new Error().stack ?? '').length % 2;
+      export const sometimes = (Date.now() % 2 ? query : mutation)(({ db }) => db.run("INSERT INTO notes (body, author) VALUES ('x', 1)").changes);
+      export const reader = query(({ db }) => db.get('SELECT COUNT(*) AS n FROM notes').n);
+      export const writer = mutation(({ db }) => db.run("INSERT INTO notes (body, author) VALUES ('y', 1)").changes);
+    `,
+    );
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const result = await shifty.call('sometimes', null, { kind: 'query' });
+      assert.equal(result.ok, false, 'published as a query: it never gets to write');
+    }
+    assert.equal(value(await shifty.call('reader', null, { kind: 'query' })), 0);
+    refused(
+      await shifty.call('reader', null, { kind: 'mutation' }),
+      'error',
+      /published as a mutation but is now a query/,
+    );
+    refused(
+      await shifty.call('writer', null, { kind: 'query' }),
+      'error',
+      /published as a query but is now a mutation/,
+    );
+    assert.equal(value(await shifty.call('writer', null, { kind: 'mutation' })), 1);
+  });
+
+  it('cannot fill the disk by rewriting the same rows in one call', async () => {
+    const limits = { ...LIMITS, callMs: 5_000, walBytes: 2 * 1024 * 1024 };
+    const notes = await app(
+      'churn',
+      `
+      export const seed = mutation(({ db }) => { for (let i = 0; i < 200; i++) db.run("INSERT INTO notes (body, author) VALUES (printf('%.*c', 3000, 'x'), 1)"); });
+      export const churn = mutation(({ db }) => {
+        let passes = 0;
+        for (;;) { try { db.run('UPDATE notes SET author = author + 1'); passes++; } catch (error) { if (passes > 1000) throw error; passes += 1000; } }
+      });
+      export const sum = query(({ db }) => db.get('SELECT SUM(author) AS total, COUNT(*) AS n FROM notes'));
+    `,
+    );
+    assert.equal((await notes.call('seed', null, {}, limits)).ok, true);
+    refused(await notes.call('churn', null, {}, limits), /^(error|timeout)$/);
+    assert.deepEqual(value(await notes.call('sum')), { total: 200, n: 200 }, 'nothing of it was kept');
+    assert.ok(statSync(path.join(dir, 'churn', 'live.db-wal')).size < 1024 * 1024, 'and the log gave its space back');
+  });
+
   it('is stopped when it recurses too deeply, in code or in data', async () => {
     const notes = await app(
       'stack',
@@ -590,12 +664,13 @@ describe('what an app cannot do with the machine', () => {
 });
 
 describe('migrations', () => {
-  const migrate = (database: string, migrations: Record<string, string>) => {
+  const migrate = (database: string, migrations: Record<string, string>, limits: Limits = LIMITS) => {
     const connection = databases.migrator(database);
     try {
       return applyMigrations(
         connection,
         Object.entries(migrations).map(([name, sql]) => ({ name, sql })),
+        limits,
       );
     } finally {
       connection.db.close();
@@ -669,8 +744,6 @@ describe('migrations', () => {
           ALTER TABLE people RENAME TO members;
           CREATE TABLE scratch (x); DROP TABLE scratch;
           DROP INDEX tasks_owner; CREATE INDEX tasks_owner ON tasks(owner, done);
-          CREATE VIRTUAL TABLE search USING fts5(label);
-          INSERT INTO search (rowid, label) SELECT id, label FROM tasks;
           ANALYZE;`,
       }).applied,
       ['001.sql', '002.sql'],
@@ -678,14 +751,12 @@ describe('migrations', () => {
     const { call } = await app(
       'rich',
       `
-      export const find = query(({ db }, { text }) => db.all('SELECT rowid AS id, label FROM search WHERE search MATCH ?', text));
       export const open = query(({ db }) => db.all('SELECT label, m.name AS owner FROM open_tasks JOIN members m ON m.id = owner'));
       export const finish = mutation(({ db }, { id }) => db.run('UPDATE tasks SET done = 1 WHERE id = ?', id).changes);
       export const orphan = mutation(({ db }) => db.run("INSERT INTO tasks (label, owner) VALUES ('x', 999)"));
     `,
       {},
     );
-    assert.deepEqual(value(await call('find', { text: 'poubelles' })), [{ id: 1, label: 'Poubelles' }]);
     assert.deepEqual(value(await call('open')), [{ label: 'Poubelles', owner: 'Tony' }]);
     assert.equal(value(await call('finish', { id: 1 })), 1);
     refused(await call('orphan'), 'error', /FOREIGN KEY/);
@@ -704,6 +775,10 @@ describe('migrations', () => {
       'CREATE TABLE sqlite_mine (x)',
       "CREATE VIRTUAL TABLE t USING csv(filename='/etc/passwd')",
       'CREATE VIRTUAL TABLE t USING rtree(id, a, b)',
+      'CREATE VIRTUAL TABLE t USING fts5(x)',
+      'CREATE VIRTUAL TABLE t USING fts5vocab(x, row)',
+      'CREATE VIRTUAL TABLE t USING dbstat',
+      'PRAGMA data_version',
       "SELECT load_extension('x')",
       `VACUUM INTO '${path.join(dir, 'stolen-by-migration.db')}'`,
     ]) {
@@ -715,6 +790,28 @@ describe('migrations', () => {
     }
     assert.ok(!existsSync(path.join(dir, 'stolen-by-migration.db')));
     assert.deepEqual(migrate('strict/live', { '001.sql': SCHEMA }), { applied: ['001.sql'], unknown: [] });
+  });
+
+  it('keep a schema within bounds', () => {
+    const many = Array.from(
+      { length: 40 },
+      (_, index) => `CREATE TABLE t${index} (id INTEGER PRIMARY KEY, x TEXT);`,
+    ).join('\n');
+    const tight = { ...LIMITS, maxSchemaObjects: 30 };
+    assert.throws(
+      () => migrate('wide/live', { '001.sql': many }, tight),
+      (error) => error instanceof MigrationError && /schema is too large: 4\d tables/.test(error.message),
+    );
+    // Refused as a whole: the database is as it was, and a schema that fits goes through.
+    assert.deepEqual(migrate('wide/live', { '001.sql': 'CREATE TABLE one (x)' }, tight), {
+      applied: ['001.sql'],
+      unknown: [],
+    });
+    const long = `CREATE TABLE big (${Array.from({ length: 150 }, (_, index) => `column_with_a_long_name_${index} TEXT`).join(', ')});`;
+    assert.throws(
+      () => migrate('long/live', { '001.sql': long }, { ...LIMITS, maxSchemaBytes: 2_000 }),
+      (error) => error instanceof MigrationError && /characters of definitions/.test(error.message),
+    );
   });
 
   it('only accepts database names made of an app and a short name', () => {

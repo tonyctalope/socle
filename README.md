@@ -117,7 +117,9 @@ Le code des apps est écrit par des agents : la plateforme le traite comme hosti
   fichiers, ni réseau, ni processus. Chaque appel reçoit un interpréteur neuf.
 - **Une base par app** : une fonction ne peut nommer que les tables de sa propre app. Une lecture ne peut pas écrire.
 - **Limites** de temps, de mémoire et de taille : un appel qui dépasse son délai est arrêté en tuant le processus qui
-  l'exécute, et sa transaction est annulée.
+  l'exécute, et sa transaction est annulée. Chaque appel a sa propre mémoire plafonnée.
+- **Partage** : une app ne peut occuper qu'une partie des processus du runner, les autres apps continuent de
+  répondre pendant qu'elle est bloquée.
 - **Build sans installation** : le code est assemblé en mémoire à partir des fichiers envoyés ; un import de paquet
   ou de fichier extérieur est une erreur de build.
 

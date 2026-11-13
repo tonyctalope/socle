@@ -8,6 +8,7 @@ import { BuildFailure, extension, type BuildProblem, type SourceFiles } from './
 // are the ones the platform provides.
 
 const NAMESPACE = 'app';
+const MAX_WARNINGS = 20;
 
 const LOADERS: Record<string, Loader> = {
   '.ts': 'ts',
@@ -115,7 +116,8 @@ export async function bundle(
     });
     const output = result.outputFiles?.[0];
     if (!output) throw new BuildFailure([{ file: entry, message: 'the bundler produced nothing' }]);
-    return { code: output.text, warnings: result.warnings.map(toProblem) };
+    // A file made of small mistakes is answered with the first few, not with all of them.
+    return { code: output.text, warnings: result.warnings.slice(0, MAX_WARNINGS).map(toProblem) };
   } catch (error) {
     if (error instanceof BuildFailure) throw error;
     const errors = (error as { errors?: Message[] }).errors;

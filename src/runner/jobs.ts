@@ -1,5 +1,6 @@
 import { buildApp, type BuildOutcome } from './build/build.ts';
 import { buildVendor, type VendorFiles } from './build/vendor.ts';
+import { BundleStore } from './bundles.ts';
 import type { Limits } from './limits.ts';
 import {
   AppDatabases,
@@ -17,39 +18,55 @@ import { callFunction, type CallRequest, type CallResult } from './sandbox/call.
 
 export type Job =
   | { type: 'call'; request: CallRequest }
+  /** Stores an app's server code, so that calls can name it by its hash. */
+  | { type: 'install'; app: string; bundle: string }
   | { type: 'build'; files: unknown }
   | { type: 'migrate'; database: string; migrations: Migration[] }
   | { type: 'vendor' }
   /** Copies an app database next to it, once per day. */
-  | { type: 'backup'; database: string; date: string; keep: number }
-  /** Loads the interpreter and the bundler, so the first real job is not the slow one. */
-  | { type: 'warm' };
+  | { type: 'backup'; database: string; date: string; keep: number };
 
 export type MigrateResult =
   ({ ok: true } & MigrationOutcome) | { ok: false; migration: string | null; message: string };
 
 export interface JobResults {
   call: CallResult;
+  install: { hash: string };
   build: BuildOutcome;
   migrate: MigrateResult;
   vendor: VendorFiles;
   backup: { ok: true; written: boolean } | { ok: false; message: string };
-  warm: { ok: true };
 }
 
 export type JobResult<J extends Job = Job> = JobResults[J['type']];
 
-/** How long a job may run before the worker doing it is killed. */
+/**
+ * Calls are short and go to workers that stay up. Everything else is rare, may be slow, and
+ * reads what an agent wrote with large libraries (the bundler, the CSS compiler): each of
+ * those jobs gets a process of its own, gone when the job is done, so that nothing a hostile
+ * source did to it can outlive the job.
+ */
+export function isOneShot(job: Job): boolean {
+  return job.type === 'build' || job.type === 'vendor' || job.type === 'migrate' || job.type === 'backup';
+}
+
+/** How long a job may run before the process doing it is killed. */
 export function timeoutOf(job: Job, limits: Limits): number {
   switch (job.type) {
     case 'call':
+    case 'install':
       return limits.callMs;
     case 'migrate':
       return limits.migrateMs;
+    case 'backup':
+      return limits.backupMs;
     default:
       return limits.buildMs;
   }
 }
+
+/** The app a database belongs to: "tricount/live" → "tricount". */
+const appOf = (database: string): string => database.split('/')[0] ?? '';
 
 export interface Executor {
   run<J extends Job>(job: J): Promise<JobResult<J>>;
@@ -59,10 +76,23 @@ export interface Executor {
 /** Runs jobs in this process. A worker process is one of these behind an IPC channel. */
 export function createExecutor(appsDir: string, limits: Limits): Executor {
   const databases = new AppDatabases(appsDir, limits);
+  const bundles = new BundleStore(appsDir);
   const run = async (job: Job): Promise<JobResult> => {
     switch (job.type) {
-      case 'call':
-        return callFunction(databases, job.request, limits);
+      case 'call': {
+        const { bundleHash, ...request } = job.request;
+        const bundle = bundles.load(appOf(request.database), bundleHash);
+        if (bundle === null) {
+          return {
+            ok: false,
+            error: { code: 'bundle_missing', message: 'the runner does not have this code' },
+            logs: [],
+          };
+        }
+        return callFunction(databases, { ...request, bundle }, limits);
+      }
+      case 'install':
+        return { hash: bundles.install(job.app, job.bundle) };
       case 'build':
         return buildApp(job.files, limits);
       case 'vendor':
@@ -73,14 +103,11 @@ export function createExecutor(appsDir: string, limits: Limits): Executor {
         } catch (error) {
           return { ok: false, message: (error as Error).message };
         }
-      case 'warm':
-        await buildApp({ 'app.json': '{"name":"warm"}', 'web/main.tsx': 'export default () => null;' }, limits);
-        return { ok: true };
       case 'migrate': {
         let connection;
         try {
           connection = databases.migrator(job.database);
-          return { ok: true, ...applyMigrations(connection, job.migrations) };
+          return { ok: true, ...applyMigrations(connection, job.migrations, limits) };
         } catch (error) {
           if (error instanceof MigrationError) return { ok: false, migration: error.migration, message: error.message };
           return { ok: false, migration: null, message: (error as Error).message };

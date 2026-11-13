@@ -1,9 +1,9 @@
+import { SOURCE_LIMITS } from '../limits.ts';
 import { bundle, type BundleScope } from './bundle.ts';
 import { BuildFailure, type BuildProblem, type SourceFiles } from './files.ts';
 
 export const WEB_ENTRY = 'web/main.tsx';
 const START = 'web/__socle_start.ts';
-const MAX_BUNDLE = 3 * 1024 * 1024;
 
 /** Where browsers load what the platform provides. One copy for every app, updated with the platform. */
 export const VENDOR_PATH = '/_socle/vendor';
@@ -64,7 +64,7 @@ export async function bundleWeb(files: SourceFiles): Promise<{ code: string; war
     }
     throw error;
   }
-  if (result.code.length > MAX_BUNDLE) {
+  if (Buffer.byteLength(result.code) > SOURCE_LIMITS.maxWebBytes) {
     throw new BuildFailure([{ file: WEB_ENTRY, message: 'the screens are too large once bundled (limit 3 MiB)' }]);
   }
   return result;

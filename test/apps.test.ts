@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { readdirSync } from 'node:fs';
+import { readdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { after, before, describe, it } from 'node:test';
+import { CallGate } from '../src/apphost/gate.ts';
 import { VendorCache } from '../src/apphost/vendor.ts';
 import { DEMO_SLUG, syncDemoApp } from '../src/apps/demo.ts';
 import { backupApps } from '../src/jobs.ts';
@@ -13,6 +14,7 @@ import { Browser, CHLOE, DEMO, setup, signIn, TONY, type TestContext } from './h
 // Apps end to end, as browsers see them: sources go in, the runner builds them, and
 // pages call the app's server functions through the platform.
 
+const TEST_LIMITS = { ...DEFAULT_LIMITS, callMs: 400, killGraceMs: 300 };
 const COURSES = 'https://courses.apps.test';
 const SECRETS = 'https://secrets.apps.test';
 
@@ -57,7 +59,9 @@ describe('an app, from its sources to the browser', () => {
   let chloeId: number;
 
   before(async () => {
-    ctx = setup({ limits: { ...DEFAULT_LIMITS, callMs: 400, killGraceMs: 300 } });
+    ctx = setup({ limits: TEST_LIMITS });
+    // A shorter patience than in production, so that the flood test does not take long.
+    ctx.deps.gate = new CallGate({ perApp: 2, waitingPerApp: 16, maxWaitMs: 1_500 });
     ctx.deps.streamPingMs = 40;
     tony = new Browser(ctx.app);
     chloe = new Browser(ctx.app);
@@ -423,8 +427,9 @@ describe('an app, from its sources to the browser', () => {
   });
 
   it('has the runner copy each app’s data once a day', async () => {
-    assert.equal(await backupApps(ctx.deps, '2027-01-15'), 2); // courses and secrets; the fake demo has no data
-    assert.equal(await backupApps(ctx.deps, '2027-01-15'), 0);
+    // courses and secrets; the fake demo has no data
+    assert.deepEqual(await backupApps(ctx.deps, '2027-01-15'), { written: 2, failed: [] });
+    assert.deepEqual(await backupApps(ctx.deps, '2027-01-15'), { written: 0, failed: [] });
     const dir = path.join(ctx.deps.config.dataDir, 'apps', 'courses', 'backups');
     assert.deepEqual(readdirSync(dir), ['live-2027-01-15.db']);
     const copy = new DatabaseSync(path.join(dir, 'live-2027-01-15.db'), { readOnly: true });
@@ -440,6 +445,64 @@ describe('an app, from its sources to the browser', () => {
       ok: false,
       message: 'invalid backup date: ../../x',
     });
+
+    // One app's copy being stopped (too slow, here) does not stop the others, and what was
+    // left half-written is not taken for a backup the next time.
+    const real = ctx.deps.runner.backup;
+    ctx.deps.runner.backup = (database, date, keep) =>
+      database === 'courses/live'
+        ? Promise.reject(new RunnerUnavailable('timeout', 'this took too long and was stopped'))
+        : real(database, date, keep);
+    try {
+      assert.deepEqual(await backupApps(ctx.deps, '2027-02-01'), { written: 1, failed: ['courses'] });
+    } finally {
+      ctx.deps.runner.backup = real;
+    }
+    writeFileSync(path.join(dir, 'live-2027-02-01.db.partial'), 'cut short');
+    assert.deepEqual(await backupApps(ctx.deps, '2027-02-01'), { written: 1, failed: [] });
+    assert.ok(readdirSync(dir).includes('live-2027-02-01.db'));
+    assert.ok(!readdirSync(dir).some((entry) => entry.endsWith('.partial')));
+  });
+
+  it('gives each app its turn at the runner, and refuses a flood instead of queueing it', async () => {
+    // One member's page of "courses" fires a burst of calls that each hold a worker until stopped.
+    const burst = Array.from({ length: 30 }, () => call(tony, 'spin'));
+    // Meanwhile the other app answers: the stuck one never holds every worker.
+    const started = Date.now();
+    assert.deepEqual(await value(await call(tony, 'list', {}, SECRETS)), [{ label: 'code du coffre' }, { label: 'x' }]);
+    assert.ok(Date.now() - started < 400, 'answered while the other app was stuck');
+    const statuses = (await Promise.all(burst)).map((response) => response.status);
+    // Two run at a time, sixteen wait their turn (and give up when it takes too long), the rest are refused at once.
+    assert.equal(statuses.filter((status) => status === 503).length >= 12, true, JSON.stringify(statuses));
+    assert.ok(
+      statuses.every((status) => status === 503 || status === 504),
+      JSON.stringify(statuses),
+    );
+    assert.ok(await value(await call(tony, 'context')), 'and the app answers again afterwards');
+  });
+
+  it('gives the runner an app’s code again when the runner lost it', async () => {
+    const outcome = await ctx.deps.apps.deploy('perdu', courses({ 'app.json': '{ "name": "Perdu" }' }), null);
+    assert.ok(outcome.ok);
+    await tony.navigate('https://perdu.apps.test/');
+    const version = ctx.deps.apps.live('perdu')!;
+    const bundles = path.join(ctx.deps.config.dataDir, 'apps', 'perdu', 'bundles');
+    assert.deepEqual(readdirSync(bundles), [`${version.bundleHash}.js`]);
+    // A runner that starts on a new disk, say: the code it was given at publication is gone.
+    rmSync(bundles, { recursive: true });
+    const direct = await ctx.deps.runner.call({
+      database: 'perdu/live',
+      bundleHash: version.bundleHash!,
+      fn: 'list',
+      input: null,
+      user: null,
+      members: [],
+      now: 0,
+      today: '',
+    });
+    assert.ok(!direct.ok && direct.error.code === 'bundle_missing');
+    assert.deepEqual(await value(await call(tony, 'list', {}, 'https://perdu.apps.test')), []);
+    assert.deepEqual(readdirSync(bundles), [`${version.bundleHash}.js`], 'the web side sent it again');
   });
 
   it('says so when the runner is away, without failing the rest', async () => {

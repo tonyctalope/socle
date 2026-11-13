@@ -8,14 +8,17 @@ import { PoolFailure, WorkerPool } from './pool.ts';
 // The runner as a service: jobs arrive as JSON over a Unix socket (the only thing
 // this process shares with the web process), and are handed to the worker pool.
 
-const MAX_BODY = 12 * 1024 * 1024;
+/** A build carries an app's sources, an install its server code; calls are far smaller. */
+const MAX_BODY = 8 * 1024 * 1024;
+/** Requests being received or answered at once; more are turned away at the door. */
+const MAX_REQUESTS = 48;
 
 /** What travels back over the socket. */
 export type Reply<J extends Job = Job> =
   | { ok: true; result: JobResult<J> }
   | { ok: false; failure: { code: PoolFailure['code'] | 'invalid'; message: string } };
 
-const JOB_TYPES = new Set(['call', 'build', 'migrate', 'vendor', 'backup', 'warm']);
+const JOB_TYPES = new Set(['call', 'install', 'build', 'migrate', 'vendor', 'backup']);
 
 export async function answer(pool: WorkerPool, job: unknown): Promise<Reply> {
   if (typeof job !== 'object' || job === null || !JOB_TYPES.has((job as { type?: string }).type ?? '')) {
@@ -47,6 +50,7 @@ export async function startRunner(options: RunnerOptions): Promise<RunnerService
   rmSync(options.socketPath, { force: true }); // left over from a previous run
   const pool = new WorkerPool({ appsDir: options.appsDir, limits: options.limits, size: options.workers });
 
+  let active = 0;
   const server: Server = createServer((request, response) => {
     const send = (status: number, body: unknown) => {
       const text = JSON.stringify(body);
@@ -61,6 +65,15 @@ export async function startRunner(options: RunnerOptions): Promise<RunnerService
       send(404, { ok: false });
       return;
     }
+    if (active >= MAX_REQUESTS) {
+      send(503, { ok: false, failure: { code: 'busy', message: 'the runner is overloaded, try again in a moment' } });
+      request.resume();
+      return;
+    }
+    active += 1;
+    response.once('close', () => {
+      active -= 1;
+    });
     const chunks: Buffer[] = [];
     let size = 0;
     request.on('data', (chunk: Buffer) => {
@@ -104,7 +117,7 @@ export async function startRunner(options: RunnerOptions): Promise<RunnerService
   } finally {
     process.umask(umask);
   }
-  void pool.run({ type: 'warm' }).catch(() => {});
+  pool.warm();
 
   return {
     pool,

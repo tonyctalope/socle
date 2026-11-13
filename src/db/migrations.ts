@@ -87,6 +87,7 @@ export const MIGRATIONS: readonly string[] = [
     web_js TEXT NOT NULL,
     web_css TEXT NOT NULL,
     server_bundle TEXT,
+    bundle_hash TEXT,
     functions TEXT NOT NULL,
     migrations TEXT NOT NULL
   );

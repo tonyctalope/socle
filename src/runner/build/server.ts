@@ -1,8 +1,8 @@
+import { SOURCE_LIMITS } from '../limits.ts';
 import { bundle } from './bundle.ts';
 import { BuildFailure, type BuildProblem, type SourceFiles } from './files.ts';
 
 export const SERVER_ENTRY = 'server/index.ts';
-const MAX_BUNDLE = 2 * 1024 * 1024;
 
 /** "@socle/server" inside a bundle is whatever the sandbox provides at call time, not a copy frozen at build time. */
 const SERVER_STD = `
@@ -40,7 +40,7 @@ export async function bundleServer(files: SourceFiles): Promise<{ code: string; 
     },
     { format: 'iife', globalName: '__app', target: 'es2023', platform: 'neutral' },
   );
-  if (result.code.length > MAX_BUNDLE) {
+  if (Buffer.byteLength(result.code) > SOURCE_LIMITS.maxServerBytes) {
     throw new BuildFailure([
       { file: SERVER_ENTRY, message: 'the server code is too large once bundled (limit 2 MiB)' },
     ]);

@@ -1,13 +1,16 @@
 import { fork, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { timeoutOf, type Job, type JobResult } from './jobs.ts';
+import { isOneShot, timeoutOf, type Job, type JobResult } from './jobs.ts';
 import type { Limits } from './limits.ts';
 
-// A few worker processes, each doing one job at a time. This is where time limits
-// become guarantees: the interpreter stops a looping function by itself, but only
-// between two instructions, and it cannot interrupt a SQL statement or a slow
-// built-in at all. A job that outlives its deadline gets its worker killed; an
-// unfinished transaction is rolled back by SQLite the next time the file is opened.
+// Worker processes, each doing one job at a time. This is where time limits become
+// guarantees: the interpreter stops a looping function by itself, but only between
+// two instructions, and it cannot interrupt a SQL statement or a slow built-in at
+// all. A job that outlives its deadline gets its process killed; an unfinished
+// transaction is rolled back by SQLite the next time the file is opened.
+//
+// Two kinds of processes. Calls go to a few workers that stay up. Builds, migrations
+// and backups each get a process of their own, one at a time, gone afterwards.
 
 export class PoolFailure extends Error {
   readonly code: 'timeout' | 'crashed' | 'busy' | 'closed';
@@ -25,6 +28,7 @@ interface Pending {
 
 interface Worker {
   child: ChildProcess;
+  once: boolean;
   ready: boolean;
   current: (Pending & { id: number; timer: NodeJS.Timeout }) | null;
   dead: boolean;
@@ -33,61 +37,77 @@ interface Worker {
 export interface PoolOptions {
   appsDir: string;
   limits: Limits;
-  /** Worker processes (default 2). */
+  /** Worker processes serving calls (default 3). */
   size?: number;
-  /** Jobs allowed to wait for a free worker before new ones are refused (default 200). */
+  /** Calls allowed to wait for a free worker before new ones are refused (default 64). */
   maxQueue?: number;
+  /** Builds, migrations and backups allowed to wait for their turn (default 16). */
+  maxOneShotQueue?: number;
 }
 
 const WORKER = fileURLToPath(new URL('./worker.ts', import.meta.url));
+/** How long a process may take to start before it is given up on. */
+const START_MS = 20_000;
 
 export class WorkerPool {
   private readonly options: Required<PoolOptions>;
   private readonly workers: Worker[] = [];
   private readonly queue: Pending[] = [];
+  private readonly oneShotQueue: Pending[] = [];
+  private oneShot: Worker | null = null;
   private nextId = 1;
   private closed = false;
-  /** Workers killed because a job outlived its deadline (for tests and /health). */
+  /** Processes killed because a job outlived its deadline (for tests and /health). */
   killed = 0;
 
   constructor(options: PoolOptions) {
-    this.options = { ...options, size: options.size ?? 2, maxQueue: options.maxQueue ?? 200 };
+    this.options = {
+      ...options,
+      size: options.size ?? 3,
+      maxQueue: options.maxQueue ?? 64,
+      maxOneShotQueue: options.maxOneShotQueue ?? 16,
+    };
   }
 
   run<J extends Job>(job: J): Promise<JobResult<J>> {
     if (this.closed) return Promise.reject(new PoolFailure('closed', 'the runner is shutting down'));
     return new Promise<JobResult>((resolve, reject) => {
-      if (this.queue.length >= this.options.maxQueue) {
+      const once = isOneShot(job);
+      const queue = once ? this.oneShotQueue : this.queue;
+      if (queue.length >= (once ? this.options.maxOneShotQueue : this.options.maxQueue)) {
         reject(new PoolFailure('busy', 'the runner is overloaded, try again in a moment'));
         return;
       }
-      this.queue.push({ job, resolve, reject });
-      this.dispatch();
+      queue.push({ job, resolve, reject });
+      if (once) this.dispatchOneShot();
+      else this.dispatch();
     }) as Promise<JobResult<J>>;
   }
 
-  /** Workers currently alive, and jobs waiting. */
+  /** Call workers currently alive, and jobs waiting. */
   stats(): { workers: number; busy: number; queued: number; killed: number } {
     return {
       workers: this.workers.length,
       busy: this.workers.filter((worker) => worker.current).length,
-      queued: this.queue.length,
+      queued: this.queue.length + this.oneShotQueue.length,
       killed: this.killed,
     };
   }
 
   async close(): Promise<void> {
     this.closed = true;
-    for (const pending of this.queue.splice(0))
-      pending.reject(new PoolFailure('closed', 'the runner is shutting down'));
+    const gone = new PoolFailure('closed', 'the runner is shutting down');
+    for (const pending of [...this.queue.splice(0), ...this.oneShotQueue.splice(0)]) pending.reject(gone);
+    const all = [...this.workers.splice(0), ...(this.oneShot ? [this.oneShot] : [])];
+    this.oneShot = null;
     await Promise.all(
-      this.workers.splice(0).map(
+      all.map(
         (worker) =>
           new Promise<void>((resolve) => {
             worker.dead = true;
             if (worker.current) {
               clearTimeout(worker.current.timer);
-              worker.current.reject(new PoolFailure('closed', 'the runner is shutting down'));
+              worker.current.reject(gone);
               worker.current = null;
             }
             if (worker.child.exitCode !== null || worker.child.signalCode !== null) return resolve();
@@ -98,18 +118,26 @@ export class WorkerPool {
     );
   }
 
-  private spawn(): Worker {
-    const child = fork(WORKER, [JSON.stringify({ appsDir: this.options.appsDir, limits: this.options.limits })], {
+  private spawn(once: boolean): Worker {
+    const config = { appsDir: this.options.appsDir, limits: this.options.limits, once };
+    const child = fork(WORKER, [JSON.stringify(config)], {
       // Nothing of the supervisor's environment reaches the code that handles app content.
       env: { NODE_ENV: 'production' },
-      execArgv: ['--max-old-space-size=384'],
+      // --expose-gc: a call's memory is handed back as soon as the call is over (see engine.ts).
+      execArgv: ['--max-old-space-size=384', '--expose-gc'],
       stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
     });
-    const worker: Worker = { child, ready: false, current: null, dead: false };
+    const worker: Worker = { child, once, ready: false, current: null, dead: false };
+    const starting = setTimeout(() => {
+      if (worker.ready || worker.dead) return;
+      child.kill('SIGKILL');
+      this.retire(worker, new PoolFailure('crashed', 'the runner could not start a worker'));
+    }, START_MS);
     child.on('message', (message: { ready?: boolean; id?: number; result?: JobResult; failure?: string }) => {
       if (message.ready) {
+        clearTimeout(starting);
         worker.ready = true;
-        this.dispatch();
+        this.assign(worker);
         return;
       }
       const current = worker.current;
@@ -118,52 +146,94 @@ export class WorkerPool {
       worker.current = null;
       if (message.failure !== undefined) current.reject(new PoolFailure('crashed', message.failure));
       else current.resolve(message.result as JobResult);
-      this.dispatch();
+      if (once) {
+        // Its one job is done: the process goes, whether or not it was about to leave by itself.
+        child.kill('SIGKILL');
+        this.retire(worker, new PoolFailure('crashed', 'the runner stopped while doing this'));
+      } else {
+        this.dispatch();
+      }
     });
-    child.on('exit', () => this.retire(worker, new PoolFailure('crashed', 'the runner stopped while doing this')));
-    child.on('error', () => this.retire(worker, new PoolFailure('crashed', 'the runner could not start a worker')));
-    this.workers.push(worker);
+    const gone = (reason: string) => {
+      clearTimeout(starting);
+      this.retire(worker, new PoolFailure('crashed', reason));
+    };
+    child.on('exit', () => gone('the runner stopped while doing this'));
+    child.on('error', () => gone('the runner could not start a worker'));
     return worker;
   }
 
+  /** Takes a process out of service; whatever it was doing fails with `reason`. */
   private retire(worker: Worker, reason: PoolFailure): void {
     if (worker.dead) return;
     worker.dead = true;
     const index = this.workers.indexOf(worker);
     if (index >= 0) this.workers.splice(index, 1);
+    if (this.oneShot === worker) this.oneShot = null;
     if (worker.current) {
       clearTimeout(worker.current.timer);
       worker.current.reject(reason);
       worker.current = null;
+    } else if (!worker.ready) {
+      // It never got as far as taking a job: fail the one that was waiting for it, so that a
+      // process that cannot start does not become an endless retry.
+      (worker.once ? this.oneShotQueue : this.queue).shift()?.reject(reason);
     }
-    if (!this.closed) this.dispatch();
+    if (this.closed) return;
+    if (worker.once) this.dispatchOneShot();
+    else this.dispatch();
+  }
+
+  /** Starts a first call worker ahead of the first call. */
+  warm(): void {
+    if (!this.closed && this.workers.length === 0) this.workers.push(this.spawn(false));
+  }
+
+  /** Hands a job to a process that is ready for one. */
+  private start(worker: Worker, pending: Pending): void {
+    const id = this.nextId++;
+    const { limits } = this.options;
+    const timer = setTimeout(
+      () => {
+        this.killed += 1;
+        worker.child.kill('SIGKILL');
+        this.retire(worker, new PoolFailure('timeout', 'this took too long and was stopped'));
+      },
+      timeoutOf(pending.job, limits) + limits.killGraceMs,
+    );
+    worker.current = { ...pending, id, timer };
+    worker.child.send({ id, job: pending.job }, (error) => {
+      if (error) this.retire(worker, new PoolFailure('crashed', 'the runner lost a worker'));
+    });
+  }
+
+  private assign(worker: Worker): void {
+    if (worker.once) {
+      const pending = this.oneShotQueue.shift();
+      // Nobody is waiting any more (the pool is closing): let the process go.
+      if (pending) this.start(worker, pending);
+      else worker.child.kill('SIGKILL');
+    } else {
+      this.dispatch();
+    }
   }
 
   private dispatch(): void {
     while (this.queue.length > 0) {
-      let worker = this.workers.find((candidate) => candidate.ready && !candidate.current && !candidate.dead);
+      const worker = this.workers.find((candidate) => candidate.ready && !candidate.current && !candidate.dead);
       if (!worker) {
         // Start another one if allowed; the job waits for its "ready".
         const starting = this.workers.some((candidate) => !candidate.ready);
-        if (!starting && this.workers.length < this.options.size) worker = this.spawn();
+        if (!starting && this.workers.length < this.options.size) this.workers.push(this.spawn(false));
         return;
       }
-      const pending = this.queue.shift()!;
-      const id = this.nextId++;
-      const { limits } = this.options;
-      const active = worker;
-      const timer = setTimeout(
-        () => {
-          this.killed += 1;
-          active.child.kill('SIGKILL');
-          this.retire(active, new PoolFailure('timeout', 'this took too long and was stopped'));
-        },
-        timeoutOf(pending.job, limits) + limits.killGraceMs,
-      );
-      active.current = { ...pending, id, timer };
-      active.child.send({ id, job: pending.job }, (error) => {
-        if (error) this.retire(active, new PoolFailure('crashed', 'the runner lost a worker'));
-      });
+      this.start(worker, this.queue.shift()!);
     }
+  }
+
+  /** One process per job, one job at a time: the next starts when the previous process is gone. */
+  private dispatchOneShot(): void {
+    if (this.oneShot || this.oneShotQueue.length === 0 || this.closed) return;
+    this.oneShot = this.spawn(true);
   }
 }

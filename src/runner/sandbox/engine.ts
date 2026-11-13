@@ -22,17 +22,23 @@ const require = createRequire(import.meta.url);
 type SyncVariant = Extract<Parameters<typeof newVariant>[0], { type: 'sync' }>;
 // The package's types describe its CommonJS build; Node loads its ES module, whose default export is the variant.
 const releaseSync = releaseSyncModule as unknown as SyncVariant;
-const { compile } = (globalThis as unknown as { WebAssembly: { compile(bytes: Uint8Array): Promise<object> } })
-  .WebAssembly;
 
-let variant: Promise<SyncVariant> | undefined;
+interface Wasm {
+  compile(bytes: Uint8Array): Promise<object>;
+  Memory: new (limits: { initial: number; maximum: number }) => { readonly buffer: ArrayBuffer };
+}
+const wasm = (globalThis as unknown as { WebAssembly: Wasm }).WebAssembly;
+
+const PAGE = 64 * 1024;
+/** What the interpreter's module asks for at start (16 MiB); a smaller memory is refused. */
+const INITIAL_PAGES = 256;
+
+let compiled: Promise<object> | undefined;
 
 /** The interpreter, compiled once per process; instances are then cheap. */
-function compiledVariant(): Promise<SyncVariant> {
-  variant ??= compile(readFileSync(require.resolve('@jitl/quickjs-wasmfile-release-sync/wasm'))).then(
-    (wasmModule) => newVariant(releaseSync, { wasmModule: wasmModule as never }) as SyncVariant,
-  );
-  return variant;
+function compiledModule(): Promise<object> {
+  compiled ??= wasm.compile(readFileSync(require.resolve('@jitl/quickjs-wasmfile-release-sync/wasm')));
+  return compiled;
 }
 
 let prelude: Promise<string> | undefined;
@@ -48,7 +54,13 @@ export function guestPrelude(): Promise<string> {
     write: false,
     logLevel: 'silent',
     footer: { js: 'globalThis.__socle = __std.socle; delete globalThis.__host;' },
-  }).then((result) => result.outputFiles[0]!.text);
+  }).then(
+    (result) => result.outputFiles[0]!.text,
+    (error: unknown) => {
+      prelude = undefined; // a failed attempt must not be remembered as the answer
+      throw error;
+    },
+  );
   return prelude;
 }
 
@@ -131,12 +143,21 @@ function failure(error: GuestError, deadline: number): GuestFailure {
  * bounds everything run in it; `bridge` is the only thing the guest can reach.
  */
 export async function createSandbox(limits: Limits, deadline: number, bridge: HostBridge): Promise<Sandbox> {
+  // The memory of this call, and the real bound on what it can hold: WebAssembly refuses to
+  // grow it past `maximum`, whatever the interpreter believes it has allocated.
+  const pages = Math.max(INITIAL_PAGES + 16, Math.ceil(limits.guestMemory / PAGE));
+  const memory = new wasm.Memory({ initial: INITIAL_PAGES, maximum: pages });
   const [quickjs, library] = await Promise.all([
-    compiledVariant().then((compiled) => newQuickJSWASMModuleFromVariant(compiled)),
+    compiledModule().then((wasmModule) =>
+      newQuickJSWASMModuleFromVariant(
+        newVariant(releaseSync, { wasmModule: wasmModule as never, wasmMemory: memory as never }) as SyncVariant,
+      ),
+    ),
     guestPrelude(),
   ]);
   let runtime: QuickJSRuntime | undefined = quickjs.newRuntime();
-  runtime.setMemoryLimit(limits.guestMemory);
+  // Only refuses a single allocation larger than the whole budget; the memory above does the rest.
+  runtime.setMemoryLimit(pages * PAGE);
   runtime.setMaxStackSize(limits.guestStack);
   runtime.setInterruptHandler(() => Date.now() > deadline);
   let vm: QuickJSContext | undefined = runtime.newContext();
@@ -261,14 +282,20 @@ export async function createSandbox(limits: Limits, deadline: number, bridge: Ho
       const [context, rt] = [vm, runtime];
       vm = undefined;
       runtime = undefined;
-      if (broken) return; // unreachable memory is reclaimed with the instance
+      const grown = memory.buffer.byteLength > 2 * INITIAL_PAGES * PAGE;
       try {
-        for (const handle of entries.values()) handle.dispose();
-        context?.dispose();
-        rt?.dispose();
+        // After a crash inside the interpreter its memory is in an unknown state: just drop it.
+        if (!broken) {
+          for (const handle of entries.values()) handle.dispose();
+          context?.dispose();
+          rt?.dispose();
+        }
       } catch {
         // a leaked handle after an error: the whole instance is dropped anyway
       }
+      // A memory that grew is only given back when it is collected: do not wait for that
+      // (worker processes run with --expose-gc; elsewhere the collector comes in its own time).
+      if (grown) (globalThis as { gc?: () => void }).gc?.();
     },
   };
 }

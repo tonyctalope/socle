@@ -12,7 +12,7 @@ if (!socketPath || !appsDir) {
   console.error('Configuration error: RUNNER_SOCKET and APPS_DIR are required');
   process.exit(1);
 }
-const workers = Number(process.env.RUNNER_WORKERS ?? 2);
+const workers = Number(process.env.RUNNER_WORKERS ?? 3);
 if (!Number.isInteger(workers) || workers < 1 || workers > 16) {
   console.error('Configuration error: RUNNER_WORKERS must be a number from 1 to 16');
   process.exit(1);

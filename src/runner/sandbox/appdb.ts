@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { constants, DatabaseSync } from 'node:sqlite';
 import type { Limits } from '../limits.ts';
@@ -81,19 +81,15 @@ function decide(
     // SQLite records schema changes by writing its own tables: only a migration gets there.
     return isInternal(first) ? mode === 'migrate' : true;
   }
-  // Full-text search tables ask for this counter themselves whenever they are used.
-  if (action === C.SQLITE_PRAGMA) return first === 'data_version' && second === null;
   if (mode !== 'migrate') return false;
   // Statistics and index rebuilds change no data, whatever the table.
   if (action === C.SQLITE_ANALYZE || action === C.SQLITE_REINDEX) return true;
   // ALTER TABLE passes (schema, table); the others pass the object's name first. Names starting
   // with sqlite_ are SQLite's own (automatic indexes); it refuses them itself from anyone else.
   if (SCHEMA_CHANGES.has(action)) return !isPlatform(action === C.SQLITE_ALTER_TABLE ? second : first);
-  // Full-text search is the one virtual table worth having.
-  if (action === C.SQLITE_CREATE_VTABLE || action === C.SQLITE_DROP_VTABLE) {
-    return (second ?? '').toLowerCase() === 'fts5' && !isPlatform(first);
-  }
-  return false; // other PRAGMAs, ATTACH, DETACH, BEGIN/COMMIT/ROLLBACK, SAVEPOINT, temporary objects, …
+  // PRAGMA, ATTACH, DETACH, BEGIN/COMMIT/ROLLBACK, SAVEPOINT, temporary objects, and every virtual
+  // table (full-text search included: a large native surface that no app needs yet).
+  return false;
 }
 
 function authorizer(mode: Mode, guard: Guard) {
@@ -107,6 +103,7 @@ function authorizer(mode: Mode, guard: Guard) {
 export interface Connection {
   db: DatabaseSync;
   guard: Guard;
+  file: string;
 }
 
 let heapLimited = false;
@@ -128,6 +125,8 @@ function connect(file: string, mode: Mode, readOnly: boolean, limits: Limits): C
     if (!readOnly) {
       db.exec('PRAGMA journal_mode = WAL');
       db.exec('PRAGMA synchronous = NORMAL');
+      // The log is cut back to this once its content is in the database file.
+      db.exec('PRAGMA journal_size_limit = 8388608');
     }
     db.exec('PRAGMA trusted_schema = OFF');
     db.exec('PRAGMA temp_store = MEMORY');
@@ -148,7 +147,7 @@ function connect(file: string, mode: Mode, readOnly: boolean, limits: Limits): C
     });
     const guard: Guard = { guest: false, denied: null };
     db.setAuthorizer(authorizer(mode, guard));
-    return { db, guard };
+    return { db, guard, file };
   } catch (error) {
     db.close();
     throw error;
@@ -266,7 +265,11 @@ const checksum = (sql: string) => createHash('sha256').update(sql).digest('hex')
  * Brings an app database up to date. New migrations apply together or not at all;
  * one that was already applied must not have changed since.
  */
-export function applyMigrations(connection: Connection, migrations: readonly Migration[]): MigrationOutcome {
+export function applyMigrations(
+  connection: Connection,
+  migrations: readonly Migration[],
+  limits: Pick<Limits, 'maxSchemaObjects' | 'maxSchemaBytes'>,
+): MigrationOutcome {
   const { db } = connection;
   const names = migrations.map((migration) => migration.name);
   if (names.some((name, index) => index > 0 && name <= names[index - 1]!)) {
@@ -316,6 +319,20 @@ export function applyMigrations(connection: Connection, migrations: readonly Mig
       record.run(migration.name, sum, new Date().toISOString());
       applied.push(migration.name);
     }
+    // Every connection to this database keeps its whole schema in memory, and a copy of the
+    // file costs what creating its tables did: a schema is bounded like the data is.
+    const schema = db
+      .prepare('SELECT COUNT(*) AS objects, COALESCE(SUM(LENGTH(sql)), 0) AS bytes FROM sqlite_master')
+      .get() as {
+      objects: number;
+      bytes: number;
+    };
+    if (schema.objects > limits.maxSchemaObjects || schema.bytes > limits.maxSchemaBytes) {
+      throw new MigrationError(
+        applied.at(-1) ?? names.at(-1) ?? '',
+        `the schema is too large: ${schema.objects} tables, indexes, views and triggers (limit ${limits.maxSchemaObjects}), ${schema.bytes} characters of definitions (limit ${limits.maxSchemaBytes})`,
+      );
+    }
     db.exec('COMMIT');
     return { applied, unknown: [...done.keys()].filter((name) => !names.includes(name)).sort() };
   } catch (error) {
@@ -328,9 +345,28 @@ export function applyMigrations(connection: Connection, migrations: readonly Mig
   }
 }
 
+/** How much the write-ahead log of a database holds right now. */
+export function walBytes(connection: Connection): number {
+  try {
+    return statSync(`${connection.file}-wal`).size;
+  } catch {
+    return 0;
+  }
+}
+
+/** After a call was stopped for writing too much: gives the log's space back. */
+export function truncateWal(connection: Connection): void {
+  try {
+    connection.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  } catch {
+    // another connection is busy with the file: the next checkpoint will do it
+  }
+}
+
 /**
  * A consistent copy of an app database next to it (backups/<name>-<date>.db), one per
- * day, keeping the last `keep`. Returns the file written, or null when there was nothing to do.
+ * day, keeping the last `keep`. Returns the file written, or null when there was nothing
+ * to do. The copy only takes its final name once complete: a copy cut short is not a backup.
  */
 export function backupDatabase(appsDir: string, database: string, date: string, keep: number): string | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new SqlRefused(`invalid backup date: ${date}`);
@@ -341,12 +377,17 @@ export function backupDatabase(appsDir: string, database: string, date: string, 
   const target = path.join(dir, `${name}-${date}.db`);
   if (existsSync(target)) return null;
   mkdirSync(dir, { recursive: true });
+  for (const entry of readdirSync(dir)) {
+    if (entry.endsWith('.partial')) rmSync(path.join(dir, entry), { force: true });
+  }
+  const partial = `${target}.partial`;
   const db = new DatabaseSync(file, { readOnly: true, timeout: 5_000 });
   try {
-    db.prepare('VACUUM INTO ?').run(target);
+    db.prepare('VACUUM INTO ?').run(partial);
   } finally {
     db.close();
   }
+  renameSync(partial, target);
   const dated = new RegExp(`^${name}-\\d{4}-\\d{2}-\\d{2}\\.db$`);
   const old = readdirSync(dir)
     .filter((entry) => dated.test(entry))

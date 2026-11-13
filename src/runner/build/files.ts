@@ -24,6 +24,7 @@ export class BuildFailure extends Error {
 export const FOLDERS = ['web', 'server', 'shared', 'migrations'] as const;
 
 const SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
+const UNPARSED = ['.svg', '.sql'];
 const EXTENSIONS: Record<string, readonly string[]> = {
   web: ['.ts', '.tsx', '.js', '.jsx', '.json', '.css', '.svg'],
   server: ['.ts', '.js', '.json'],
@@ -53,7 +54,40 @@ function pathProblem(file: string): string | null {
   return null;
 }
 
-/** Checks the shape of what was sent, before anything reads it. */
+/** How deep brackets nest in a text, without telling code from strings: an upper bound is enough. */
+function nesting(text: string): number {
+  let depth = 0;
+  let deepest = 0;
+  for (let index = 0; index < text.length; index++) {
+    const char = text.charCodeAt(index);
+    // ( [ {
+    if (char === 40 || char === 91 || char === 123) {
+      depth += 1;
+      if (depth > deepest) deepest = depth;
+    } else if ((char === 41 || char === 93 || char === 125) && depth > 0) {
+      depth -= 1;
+    }
+  }
+  return deepest;
+}
+
+function longestLine(text: string): number {
+  let longest = 0;
+  let start = 0;
+  for (;;) {
+    const end = text.indexOf('\n', start);
+    const length = (end === -1 ? text.length : end) - start;
+    if (length > longest) longest = length;
+    if (end === -1) return longest;
+    start = end + 1;
+  }
+}
+
+/**
+ * Checks the shape of what was sent, before anything reads it. Sizes are counted in
+ * bytes; lines and nesting are bounded because parsers pay for both, and no
+ * hand-written file comes close to the limits.
+ */
 export function checkFiles(files: unknown): BuildProblem[] {
   if (typeof files !== 'object' || files === null || Array.isArray(files)) {
     return [{ message: 'expected an object of path → text' }];
@@ -70,10 +104,19 @@ export function checkFiles(files: unknown): BuildProblem[] {
     }
     const problem = pathProblem(file);
     if (problem) problems.push({ file, message: problem });
-    if (text.length > SOURCE_LIMITS.maxFileBytes) {
+    const bytes = Buffer.byteLength(text);
+    total += bytes;
+    if (bytes > SOURCE_LIMITS.maxFileBytes) {
       problems.push({ file, message: `file too large (limit ${SOURCE_LIMITS.maxFileBytes / 1024} KiB)` });
+      continue;
     }
-    total += text.length;
+    // Pictures and SQL are not read by the bundler: only what it parses is held to a line length.
+    if (!UNPARSED.includes(extension(file)) && longestLine(text) > SOURCE_LIMITS.maxLineLength) {
+      problems.push({ file, message: `a line is longer than ${SOURCE_LIMITS.maxLineLength} characters: break it up` });
+    }
+    if (nesting(text) > SOURCE_LIMITS.maxNesting) {
+      problems.push({ file, message: `brackets are nested more than ${SOURCE_LIMITS.maxNesting} deep` });
+    }
   }
   if (total > SOURCE_LIMITS.maxTotalBytes) {
     problems.push({

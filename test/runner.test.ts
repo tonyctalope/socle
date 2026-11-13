@@ -45,10 +45,11 @@ async function deploy(runner: Runner, app: string) {
   const database = `${app}/live`;
   const migrated = await runner.migrate(database, built.app.migrations);
   assert.deepEqual(migrated, { ok: true, applied: ['001_init.sql'], unknown: [] });
+  const bundleHash = await runner.install(app, built.app.server!.bundle);
   const call = (fn: string, input: unknown = null) =>
     runner.call({
       database,
-      bundle: built.app.server!.bundle,
+      bundleHash,
       fn,
       input,
       user: TONY,
@@ -135,21 +136,31 @@ describe('the runner, as the web process uses it', () => {
 });
 
 describe('the worker pool', () => {
+  // A call the runner answers at once: it does not know that code.
+  const quick = (database = 'nobody/live') => ({
+    type: 'call' as const,
+    request: { database, bundleHash: '0'.repeat(64), fn: 'x', input: null, user: null, members: [], now: 0, today: '' },
+  });
+
   it('refuses new jobs when too many are waiting, and when closed', async () => {
     const pool = new WorkerPool({ appsDir: path.join(dir, 'pool'), limits: LIMITS, size: 1, maxQueue: 3 });
     const jobs = Array.from({ length: 6 }, () =>
-      pool.run({ type: 'warm' }).then(
-        () => 'done',
+      pool.run(quick()).then(
+        (result) => (result.ok ? 'ok' : result.error.code),
         (error: PoolFailure) => error.code,
       ),
     );
-    assert.deepEqual((await Promise.all(jobs)).sort(), ['busy', 'busy', 'busy', 'done', 'done', 'done']);
+    assert.deepEqual((await Promise.all(jobs)).sort(), [
+      'bundle_missing',
+      'bundle_missing',
+      'bundle_missing',
+      'busy',
+      'busy',
+      'busy',
+    ]);
     assert.equal(pool.stats().workers, 1);
     await pool.close();
-    await assert.rejects(
-      pool.run({ type: 'warm' }),
-      (error) => error instanceof PoolFailure && error.code === 'closed',
-    );
+    await assert.rejects(pool.run(quick()), (error) => error instanceof PoolFailure && error.code === 'closed');
   });
 
   it('starts a new worker after a kill', async () => {
@@ -158,12 +169,13 @@ describe('the worker pool', () => {
       const built = await pool.run({ type: 'build', files: SOURCE });
       assert.ok(built.ok);
       await pool.run({ type: 'migrate', database: 'respawn/live', migrations: built.app.migrations });
+      const { hash } = await pool.run({ type: 'install', app: 'respawn', bundle: built.app.server!.bundle });
       const call = (fn: string) =>
         pool.run({
           type: 'call',
           request: {
             database: 'respawn/live',
-            bundle: built.app.server!.bundle,
+            bundleHash: hash,
             fn,
             input: null,
             user: null,
@@ -176,6 +188,42 @@ describe('the worker pool', () => {
       assert.deepEqual(pool.stats(), { workers: 0, busy: 0, queued: 0, killed: 1 });
       assert.deepEqual(await call('count'), { ok: true, kind: 'query', value: 0, effects: [], logs: [] });
       assert.equal(pool.stats().workers, 1);
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it('gives every build a process of its own, so a source that breaks the bundler breaks nothing else', async () => {
+    const pool = new WorkerPool({ appsDir: path.join(dir, 'builds'), limits: LIMITS, size: 1 });
+    try {
+      const good = await pool.run({ type: 'build', files: SOURCE });
+      assert.ok(good.ok);
+      // Files no person would write: refused by name of the problem, before any parser sees them.
+      const deep = await pool.run({
+        type: 'build',
+        files: { ...SOURCE, 'web/deep.ts': `export const x = ${'['.repeat(5_000)}${']'.repeat(5_000)};` },
+      });
+      assert.ok(
+        !deep.ok && deep.problems.some((problem) => /nested more than 500 deep/.test(problem.message)),
+        JSON.stringify(deep),
+      );
+      const wide = await pool.run({ type: 'build', files: { ...SOURCE, 'web/wide.ts': 'x==-0;'.repeat(16_000) } });
+      assert.ok(!wide.ok && /longer than 5000 characters/.test(wide.problems[0]!.message), JSON.stringify(wide));
+      // Many small mistakes: answered with a few of them, not with the whole file once per mistake.
+      const noisy = await pool.run({
+        type: 'build',
+        files: {
+          ...SOURCE,
+          'web/noisy.ts': 'x==-0;\n'.repeat(5_000),
+          'web/main.tsx': 'import "./noisy"; export default () => null;',
+        },
+      });
+      assert.ok(noisy.ok && noisy.app.warnings.length <= 20, JSON.stringify(noisy).slice(0, 300));
+      // Whatever happened in those processes, the next build starts from a new one.
+      const again = await pool.run({ type: 'build', files: SOURCE });
+      assert.ok(again.ok);
+      assert.equal(again.app.web.js, good.app.web.js);
+      assert.equal(pool.stats().workers, 0, 'builds never used a call worker');
     } finally {
       await pool.close();
     }

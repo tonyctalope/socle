@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { transform } from 'esbuild';
 import { compile } from 'tailwindcss';
+import { SOURCE_LIMITS } from '../limits.ts';
 import { BuildFailure, type SourceFiles } from './files.ts';
 
 // Tailwind's compiler is plain JavaScript: given a stylesheet and the class names
@@ -109,13 +110,20 @@ export async function buildAppCss(files: SourceFiles): Promise<string> {
   const sources = Object.entries(files)
     .filter(([file]) => (file.startsWith('web/') || file.startsWith('shared/')) && !file.endsWith('.css'))
     .map(([, text]) => text);
+  let css: string;
   try {
-    return await compileSheet(APP_HEAD + (files[APP_STYLE] ?? ''), files, classCandidates(sources));
+    css = await compileSheet(APP_HEAD + (files[APP_STYLE] ?? ''), files, classCandidates(sources));
   } catch (error) {
     throw new BuildFailure([
       { file: Object.hasOwn(files, APP_STYLE) ? APP_STYLE : undefined, message: (error as Error).message },
     ]);
   }
+  if (Buffer.byteLength(css) > SOURCE_LIMITS.maxCssBytes) {
+    throw new BuildFailure([
+      { message: 'the stylesheet is too large once built (limit 1 MiB): use fewer distinct classes' },
+    ]);
+  }
+  return css;
 }
 
 /** The stylesheet every app page loads first: theme variables, base styles, and what the UI kit needs. */

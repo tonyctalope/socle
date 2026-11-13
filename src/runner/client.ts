@@ -25,6 +25,8 @@ export interface Runner {
   build(files: unknown): Promise<BuildOutcome>;
   vendor(): Promise<VendorFiles>;
   migrate(database: string, migrations: Migration[]): Promise<MigrateResult>;
+  /** Stores an app's server code in the runner and returns the hash that calls name it by. */
+  install(app: string, bundle: string): Promise<string>;
   call(request: CallRequest): Promise<CallResult>;
   /** Copies an app database next to it (one copy per day, the last `keep` are kept). */
   backup(database: string, date: string, keep: number): Promise<JobResult<{ type: 'backup' } & Job>>;
@@ -44,6 +46,7 @@ function runner(send: Send, healthy: () => Promise<boolean>, close: () => Promis
     build: (files) => run({ type: 'build', files }),
     vendor: () => run({ type: 'vendor' }),
     migrate: (database, migrations) => run({ type: 'migrate', database, migrations }),
+    install: async (app, bundle) => (await run({ type: 'install', app, bundle })).hash,
     backup: (database, date, keep) => run({ type: 'backup', database, date, keep }),
     async call(callRequest) {
       try {
@@ -128,7 +131,8 @@ function post<T>(
 /** The runner of the deployment, behind its Unix socket. */
 export function remoteRunner(socketPath: string, limits: Limits): Runner {
   // The runner enforces the real deadlines; this one only covers a runner that is gone.
-  const patience = Math.max(limits.buildMs, limits.migrateMs, limits.callMs) + limits.killGraceMs + 5_000;
+  // One-shot jobs (builds, migrations, backups) also wait for their turn in the runner.
+  const patience = 4 * Math.max(limits.buildMs, limits.migrateMs, limits.backupMs) + limits.killGraceMs + 5_000;
   return runner(
     (job) => post(socketPath, 'POST', '/job', job, patience),
     () =>

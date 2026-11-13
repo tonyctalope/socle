@@ -31,7 +31,7 @@ import { countSubscriptions, deleteSubscription, parseSubscription, saveSubscrip
 import { RunnerUnavailable } from '../runner/client.ts';
 import type { CallResult, NotifyEffect } from '../runner/sandbox/call.ts';
 import { allowlist, type AppHostEnv, type Deps } from '../types.ts';
-import { MAX_STREAMS_PER_MEMBER } from './live.ts';
+import { CallGate } from './gate.ts';
 import { appManifest } from './manifest.ts';
 import { shellPage } from './shell.ts';
 
@@ -62,6 +62,7 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
   const subscribeLimiter = new RateLimiter(30, 60_000);
   const testLimiter = new RateLimiter(10, 60_000);
   const functionLimiter = new RateLimiter(600, 60_000);
+  deps.gate ??= new CallGate();
   const notifyLimiter = new RateLimiter(30, 60_000);
 
   const send = (c: Context, file: StaticFile, headers: Record<string, string> = {}) =>
@@ -319,7 +320,7 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
     const row = c.get('app');
     const version = deps.apps.live(row.slug);
     const info = version?.functions.get(c.req.param('name'));
-    if (!version?.bundle || !info) return problem(c, 404, 'unknown_function', 'Fonction inconnue.');
+    if (!version?.bundleHash || !info) return problem(c, 404, 'unknown_function', 'Fonction inconnue.');
     const body = (await jsonBody(c)) as { input?: unknown; query?: unknown } | undefined;
     if (typeof body !== 'object' || body === null) return problem(c, 400, 'invalid_request', 'Requête invalide.');
     // A screen that only displays must never trigger a write by mistake.
@@ -327,23 +328,37 @@ export function appHostApp(deps: Deps): Hono<AppHostEnv> {
       return problem(c, 400, 'not_a_query', `${info.name} modifie des données : appelle-la avec api.${info.name}().`);
     }
     const caller = self(c);
-    let result: CallResult;
-    try {
-      result = await deps.runner.call({
+    const { bundleHash } = version;
+    const send = () =>
+      deps.runner.call({
         database: liveDatabase(row.slug),
-        bundle: version.bundle,
+        bundleHash,
         fn: info.name,
+        kind: info.kind,
         input: body.input ?? null,
         user: caller,
         members: appMembers(db, row, isAllowed),
         now: deps.now().getTime(),
         today: localDate(config, deps.now()),
       });
+    let result: CallResult | 'busy' | 'gone';
+    try {
+      result = await deps.gate!.run(row.slug, c.req.raw.signal, async () => {
+        const first = await send();
+        if (first.ok || first.error.code !== 'bundle_missing') return first;
+        // The runner lost this app's code (a fresh volume, for instance): give it again, once.
+        const bundle = deps.apps.bundleOf(version.id);
+        if (bundle === null) return first;
+        await deps.runner.install(row.slug, bundle);
+        return send();
+      });
     } catch (error) {
       if (!(error instanceof RunnerUnavailable)) throw error;
       console.error(`runner unavailable (${error.code}): ${error.message}`);
       return problem(c, 503, 'unavailable', 'Le service est momentanément indisponible.');
     }
+    if (result === 'gone') return c.body(null, 204); // nobody is listening any more
+    if (result === 'busy') return problem(c, 503, 'busy', 'L’appli est occupée, réessaie dans un instant.');
     for (const line of result.logs) console.info(`[${row.slug}] ${info.name}: ${line}`);
     if (!result.ok) return failure(c, info.name, result);
     if (result.kind === 'mutation') {

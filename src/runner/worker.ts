@@ -1,6 +1,9 @@
+import { writeFileSync } from 'node:fs';
+import { stop } from 'esbuild';
 import { createExecutor } from './jobs.ts';
 import type { Job } from './jobs.ts';
 import type { Limits } from './limits.ts';
+import { guestPrelude } from './sandbox/engine.ts';
 
 // A worker process: runs one job at a time for the supervisor, which kills it if a
 // job outlives its deadline. Everything it needs comes on the command line; its
@@ -9,6 +12,8 @@ import type { Limits } from './limits.ts';
 interface WorkerConfig {
   appsDir: string;
   limits: Limits;
+  /** Do one job, then exit (builds, migrations, backups). */
+  once: boolean;
 }
 
 const config = JSON.parse(process.argv[2] ?? 'null') as WorkerConfig | null;
@@ -17,14 +22,34 @@ if (!config || !process.send) {
   process.exit(2);
 }
 
+// If the machine runs out of memory, this process should go before the supervisor does.
+try {
+  writeFileSync('/proc/self/oom_score_adj', '1000');
+} catch {
+  // not Linux, or not allowed: nothing depends on it
+}
+
 const executor = createExecutor(config.appsDir, config.limits);
+
+if (!config.once) {
+  // A worker that serves calls only needs the bundler once, for the platform's own library:
+  // build it now and let the bundler go.
+  await guestPrelude();
+  await stop();
+}
 
 process.on('message', (message: { id: number; job: Job }) => {
   executor.run(message.job).then(
-    (result) => process.send!({ id: message.id, result }),
+    (result) => {
+      process.send!({ id: message.id, result }, () => {
+        if (config.once) process.exit(0);
+      });
+    },
     (error: unknown) => {
+      // Not a refusal of the job but something broken in this process (a bundler that died,
+      // for instance): answer, then leave, so that the next job gets a healthy process.
       console.error('job failed:', error);
-      process.send!({ id: message.id, failure: 'the runner failed to do this' });
+      process.send!({ id: message.id, failure: 'the runner failed to do this' }, () => process.exit(1));
     },
   );
 });
