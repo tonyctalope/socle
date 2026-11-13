@@ -188,6 +188,16 @@ export function appSiteFromHost(config: Config, host: string): Site | null {
   return parseSite(host.slice(0, -suffix.length));
 }
 
+/** The time of day (HH:MM, 24 hours) where the members live. */
+export function localTime(config: Config, date: Date): string {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: config.timezone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).format(date);
+}
+
 /** The calendar date (YYYY-MM-DD) where the members live. */
 export function localDate(config: Config, date: Date): string {
   return new Intl.DateTimeFormat('en-CA', {

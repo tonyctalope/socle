@@ -110,7 +110,7 @@ A map of path → text (`src/runner/build/files.ts` checks its shape):
   May import `react`, `react-dom`, `@socle/sdk`, `@socle/ui`, and its own files in `web/` and `shared/`. Styling is
   Tailwind classes (+ optional `web/style.css`).
 - `server/index.ts` — exports `query(...)`, `mutation(...)` and `schedule(...)` from `@socle/server`; imports only `server/` and
-  `shared/`. A function gets `{ db, user, members, now, today, locale, notify }` and its input (checked against `v.…`).
+  `shared/`. A function gets `{ db, user, members, now, today, time, locale, notify, files }` and its input (checked against `v.…`).
 - `migrations/NNN_name.sql` — applied once each, in name order, all new ones in one transaction.
 
 Browser side, `useQuery('name', input)` reads a query and refetches it whenever any mutation of the app succeeds

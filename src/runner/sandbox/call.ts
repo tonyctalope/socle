@@ -35,9 +35,10 @@ export interface Invocation {
   /** Null when the platform itself runs the function (a schedule). */
   user: Member | null;
   members: Member[];
-  /** Epoch milliseconds, and the date (YYYY-MM-DD) in the instance's timezone. */
+  /** Epoch milliseconds, and the date (YYYY-MM-DD) and time of day (HH:MM) in the instance's timezone. */
   now: number;
   today: string;
+  time?: string;
   /** Language of the instance (APP_LOCALE), for apps that speak more than one. */
   locale?: string;
 }
@@ -330,6 +331,7 @@ export async function callFunction(databases: AppDatabases, request: Invocation,
       members: request.members,
       now: request.now,
       today: request.today,
+      time: request.time ?? '',
       locale: request.locale ?? 'en',
     });
     const answer = sandbox.call('__invoke', [request.fn, context, input], limits.maxResultBytes);

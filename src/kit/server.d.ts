@@ -31,9 +31,13 @@ declare module '@socle/server' {
     user: Member;
     /** Everyone who can open the app. */
     members: Member[];
-    /** Time of the call (epoch milliseconds) and today's date (YYYY-MM-DD) in the instance's timezone (APP_TIMEZONE). */
+    /**
+     * Time of the call (epoch milliseconds), and in the instance's timezone (APP_TIMEZONE): today's date
+     * (YYYY-MM-DD) and the time of day (HH:MM, 24 hours).
+     */
     now: number;
     today: string;
+    time: string;
     /** The language the instance is set to ("en", "fr"…): the same value as `locale` in `@socle/sdk`. */
     locale: string;
     /**

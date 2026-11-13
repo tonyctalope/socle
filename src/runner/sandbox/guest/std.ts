@@ -138,6 +138,7 @@ interface CallContext {
   members: { id: number; name: string }[];
   now: number;
   today: string;
+  time: string;
   locale: string;
 }
 
@@ -157,9 +158,10 @@ function invoke(name: string, contextJson: string, inputJson: string): string | 
     user: given.user,
     /** Everyone who can open the app: [{ id, name }]. */
     members: given.members,
-    /** The time of the call in milliseconds, and today's date (YYYY-MM-DD) in the instance's timezone. */
+    /** The time of the call in milliseconds; today's date (YYYY-MM-DD) and the time of day (HH:MM) in the instance's timezone. */
     now: given.now,
     today: given.today,
+    time: given.time,
     /** The language the instance is set to ("en", "fr"…). */
     locale: given.locale,
     /** Sends a notification once the call has succeeded. `to`: a user id, a list of ids, "others" or "all". */

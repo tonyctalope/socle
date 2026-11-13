@@ -14,6 +14,8 @@ export interface Boot {
   push: { publicKey: string };
   /** Language of the platform's own words, e.g. "en". */
   locale: string;
+  /** Where the members live, as an IANA timezone name. */
+  timezone?: string;
   /** True when this page is the app's draft, not what is published. */
   draft?: boolean;
 }
@@ -31,6 +33,12 @@ export const boot: Boot = read();
  * speak, and a good default for `toLocaleDateString(locale)`.
  */
 export const locale: string = boot.locale || 'en';
+
+/**
+ * The instance's timezone ("Europe/Paris"…), the one `today` is counted in on the server: pass it as
+ * `timeZone` to `toLocaleDateString` and friends so that every phone shows the same day.
+ */
+export const timezone: string = boot.timezone || 'UTC';
 
 /** Picks the platform's words for that language; English when there is no translation. */
 export function words<T>(all: { en: T } & Record<string, T>): T {
