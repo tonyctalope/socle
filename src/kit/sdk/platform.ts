@@ -12,7 +12,7 @@ export function useMe(): { user: typeof boot.user; app: typeof boot.app; members
   return boot;
 }
 
-/** Ends the sign-in on this browser, for every app, then leaves for the home page. */
+/** Ends the sign-in on this browser, for every app, then shows this app's signed-out page. */
 export async function logout(): Promise<void> {
   const { url } = await request<{ url: string }>('POST', '/logout');
   location.assign(url);

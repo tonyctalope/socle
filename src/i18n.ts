@@ -51,6 +51,7 @@ const FR: Record<string, string> = {
 
   // App hosts
   'There is no app at this address.': 'Aucune appli à cette adresse.',
+  'You are signed out.': 'Vous êtes déconnecté.',
   'Sign-in interrupted': 'Connexion interrompue',
   'The sign-in link expired, or cookies are blocked for this site.':
     'Le lien de connexion a expiré ou les cookies sont bloqués pour ce site.',

@@ -249,7 +249,12 @@ describe('sign-on from the control plane to an app host', () => {
 
     const out = await phone.fetch(`${DEMO}/_socle/api/logout`, { method: 'POST' });
     assert.equal(out.status, 200);
-    assert.deepEqual(await out.json(), { url: `${CONTROL}/` });
+    // Signing out stays in the app: an installed app must not land on the control plane's list of apps.
+    assert.deepEqual(await out.json(), { url: '/_socle/signed-out' });
+    const signedOut = await phone.request(`${DEMO}/_socle/signed-out`);
+    assert.equal(signedOut.status, 200);
+    assert.equal(signedOut.headers.get('cache-control'), 'no-store');
+    assert.match(await signedOut.text(), /You are signed out\.[\s\S]*href="\/_socle\/login\?next=%2F"/);
     assert.equal((await phone.fetch(`${NOTES}/_socle/api/me`)).status, 401); // the other app too
     assert.match(await (await phone.request(`${CONTROL}/`)).text(), /Sign in to open your apps/);
     assert.equal((await laptop.fetch(`${NOTES}/_socle/api/me`)).status, 200); // another device is untouched
@@ -258,6 +263,13 @@ describe('sign-on from the control plane to an app host', () => {
     assert.equal(form.status, 303);
     assert.equal((await laptop.fetch(`${DEMO}/_socle/api/me`)).status, 401);
     assert.equal(get<{ n: number }>(ctx.deps.db, 'SELECT COUNT(*) AS n FROM sessions')!.n, 0);
+
+    // Signing in again from the app's signed-out page ends on the app, and the page is only for the signed-out.
+    signIn(ctx, phone, BOB);
+    const back = await phone.navigate(`${DEMO}/_socle/login?next=%2F`);
+    assert.equal(back.url, `${DEMO}/`);
+    assert.equal(back.response.status, 200);
+    assert.equal((await phone.navigate(`${DEMO}/_socle/signed-out`)).url, `${DEMO}/`);
     ctx.cleanup();
   });
 
