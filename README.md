@@ -1,25 +1,49 @@
 # Socle
 
-One self-hosted platform for the small apps of a household, a team or a club. Socle provides once what every small
-app otherwise rebuilds on its own: sign-in, sessions, notifications, the Home Screen install, the build and the
-database. An app is then only its screens and its logic, sent as source files — written by a person or by an AI
-agent — and there is a single service to keep up to date.
+One self-hosted platform for the small apps of a household, a team or a club: the shopping list, the chores, the
+shared expenses, the plants to water. You describe the app to an AI agent (or write it yourself); Socle builds it,
+runs it in a sandbox and gives it sign-in, a database, notifications and a place on everyone's Home Screen.
 
-It is made for a few people who know each other: an allowlist of e-mail addresses decides who gets in.
+<p align="center">
+  <img src="docs/images/overview.png" width="100%"
+    alt="Four steps: an agent connects over MCP, it builds a draft of a shopping list app, an administrator publishes it, everyone uses it on their phone">
+</p>
 
-## Status
-
-| Step | What                                                                                   | State |
-| ---- | -------------------------------------------------------------------------------------- | ----- |
-| 1    | Sign-in (OpenID Connect), one session per subdomain, PWA and notifications, a demo app | done  |
-| 2    | Apps built without `npm install`, one SQLite database per app, sandboxed functions     | done  |
-| 3    | Agents create apps over MCP: drafts, an administrator publishes                        | done  |
-| 4    | One MCP server per app (its functions as tools)                                        | done  |
-| 4b   | Versions and rollback, per-app icons and access lists                                  | done  |
-| 5    | Scheduled functions                                                                    | done  |
-| 6    | Files and photos                                                                       | done  |
+- **One service to run and keep up to date**, whatever the number of apps. An app brings no dependency of its own.
+- **An app is a handful of source files**: its screens, its server functions, its database schema. No `npm install`,
+  no build step, no deployment.
+- **Agents build, people decide**: an agent connected over MCP only ever writes drafts. An administrator sees what
+  a draft changes and publishes it.
+- **Agent-written code is treated as hostile**: it runs in a WebAssembly sandbox with no network and no file
+  access, on a database of its own.
+- **Made for a few people who know each other**: an allowlist of e-mail addresses decides who gets in, with your
+  own OpenID Connect provider (Google, Microsoft, Keycloak, Authentik…).
 
 ## How it works
+
+```mermaid
+flowchart LR
+  subgraph people["Phones and browsers"]
+    home["socle.example.com<br/>sign-in, list of apps"]
+    one["groceries.apps.example.com"]
+    two["chores.apps.example.com"]
+  end
+  agent["An AI agent<br/>MCP client"]
+  subgraph server["Your server"]
+    web["<b>web</b> container<br/>sign-in, sessions, notifications,<br/>files, MCP: holds the secrets,<br/>never runs app code"]
+    runner["<b>runner</b> container<br/>no network, no secret:<br/>builds the apps, runs their<br/>functions in a sandbox"]
+    data[("one SQLite database<br/>per app")]
+  end
+  home --> web
+  one --> web
+  two --> web
+  agent -- "drafts only" --> web
+  web -- "Unix socket" --> runner
+  runner --> data
+```
+
+<img src="docs/images/home-page.png" align="right" width="230"
+  alt="The home page of the control plane: a greeting, the list of apps, the administration and sign-out buttons">
 
 One server answers on two kinds of addresses:
 
@@ -58,11 +82,14 @@ the platform.
 | `migrations/NNN_*.sql` | The schema of the app's database, each file applied once, in name order |
 | `shared/`              | What the screens and the server have in common                          |
 
+Here is the whole shopping list of the pictures above, with its one-table schema
+(`CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT NOT NULL, author INTEGER NOT NULL, done INTEGER NOT NULL DEFAULT 0)`):
+
 ```ts
 // server/index.ts
 import { mutation, query, v } from '@socle/server';
 
-export const list = query(({ db }) => db.all('SELECT id, label FROM items ORDER BY id'));
+export const list = query(({ db }) => db.all('SELECT id, label, done FROM items ORDER BY done, id DESC'));
 
 export const add = mutation({
   input: v.object({ label: v.string().min(1).max(80) }),
@@ -71,27 +98,48 @@ export const add = mutation({
     notify('others', { title: `${user.name} added ${label}` });
   },
 });
+
+export const toggle = mutation({
+  input: v.object({ id: v.int() }),
+  handler: ({ db }, { id }) => db.run('UPDATE items SET done = 1 - done WHERE id = ?', id),
+});
 ```
 
 ```tsx
 // web/main.tsx
+import { useState } from 'react';
 import { api, useQuery } from '@socle/sdk';
-import { Button, List, ListItem, Page } from '@socle/ui';
+import { Button, Checkbox, Input, List, ListItem, Page } from '@socle/ui';
 
 export default function App() {
-  const items = useQuery<{ id: number; label: string }[]>('list');
+  const items = useQuery<{ id: number; label: string; done: number }[]>('list');
+  const [label, setLabel] = useState('');
+  const add = () => api.add({ label }).then(() => setLabel(''));
   return (
     <Page title="Groceries">
+      <form onSubmit={(event) => (event.preventDefault(), void add())} className="flex gap-2">
+        <Input value={label} onChange={(event) => setLabel(event.target.value)} placeholder="Milk, bread…" />
+        <Button type="submit">Add</Button>
+      </form>
       <List>
         {items.data?.map((item) => (
-          <ListItem key={item.id}>{item.label}</ListItem>
+          <ListItem key={item.id}>
+            <Checkbox label={item.label} checked={item.done === 1} onChange={() => api.toggle({ id: item.id })} />
+          </ListItem>
         ))}
       </List>
-      <Button onClick={() => api.add({ label: 'Bread' })}>Add bread</Button>
     </Page>
   );
 }
 ```
+
+Nothing in it speaks of synchronisation, and yet every open phone follows: after a successful change, the platform
+tells the open pages of the app to read again what they show.
+
+<p align="center">
+  <img src="docs/images/realtime.gif" width="560"
+    alt="Two phones side by side: what Alice adds appears on Bob's phone at once, and what Bob ticks is ticked on Alice's">
+</p>
 
 Photos and documents are kept by the platform: a screen sends the file (`files.uploadImage(file)`, or the
 ready-made `<PhotoButton>`, which makes a phone's photo smaller first) and the app stores the id it gets back;
@@ -101,8 +149,8 @@ the members of that app only.
 A third kind of function runs by itself: `schedule({ every: 'day', at: '08:00', handler })` (or every hour, or
 every week on a given day), in the instance's timezone, for reminders and recurring entries.
 
-Each function runs in one transaction on the app's database: if it fails, nothing is written. After a successful
-change, every open page of the app reloads what it shows. `src/demo/` is a complete app written this way
+Each function runs in one transaction on the app's database: if it fails, nothing is written. `src/demo/` is a
+complete app written this way
 (`DEMO_APP=1`, served on `demo.<APPS_DOMAIN>`): it checks, on a real phone, sign-in, install, notifications and a
 shared list.
 
@@ -121,7 +169,8 @@ that signs in with OAuth): the member signs in with their usual account and thei
 | `call_function` | Runs a server function of the draft, to check it                            |
 | `read_logs`     | What the app's functions printed and how they failed                        |
 
-Everything an agent writes goes to the app's **draft**, served at `https://<app>--draft.<APPS_DOMAIN>` on a
+The four pictures at the top of this page are that path, from the connection to the phones. Everything an agent
+writes goes to the app's **draft**, served at `https://<app>--draft.<APPS_DOMAIN>` on a
 database of its own: members can try it, and nothing changes in the app they use. There is no tool that publishes
 and none that deletes. An administrator (`ADMIN_EMAILS`) publishes a draft from `<CONTROL_URL>/admin/`, after
 seeing which files it changes; the published database then gets the draft's migrations. The same pages bring back an
