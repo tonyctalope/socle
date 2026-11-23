@@ -23,7 +23,7 @@
     "@resvg/resvg-wasm": "^2.6.2",
     "esbuild": "^0.28.2",
     "hono": "^4.13.18",
-    "openid-client": "^6.8.9",
+    "openid-client": "^6.9.0",
     "quickjs-emscripten-core": "^0.32.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
